@@ -1,0 +1,17 @@
+# Use the official Python image as a base
+FROM python:3.10-slim
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the request handler script into the container
+COPY requestHandler.py ./
+
+# Install required Python packages
+RUN pip install fastapi redis uvicorn
+
+# Expose the FastAPI port
+EXPOSE 8000
+
+# Set the default command to run the FastAPI app using standard python
+CMD ["python", "requestHandler.py"]

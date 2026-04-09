@@ -1,0 +1,14 @@
+# Use the official Python image as a base
+FROM python:3.10-slim
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the verifier worker script into the container
+COPY STARKVerifierWorker.py ./
+
+# Install required Python packages
+RUN pip install redis
+
+# Set the default command to run the worker
+CMD ["python", "STARKVerifierWorker.py"]

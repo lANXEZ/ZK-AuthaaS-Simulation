@@ -1,0 +1,69 @@
+version: '3.8'
+services:
+  proof-queue:
+    image: redis:latest
+    container_name: proof-queue
+    ports:
+      - "6379:6379"
+  snark-queue:
+    image: redis:latest
+    container_name: snark-queue
+    ports:
+      - "6380:6379"
+  stark-queue:
+    image: redis:latest
+    container_name: stark-queue
+    ports:
+      - "6381:6379"
+  request-handler:
+    build:
+      context: .
+      dockerfile: Dockerfile.requesthandler
+    container_name: request-handler
+    depends_on:
+      - proof-queue
+    environment:
+      - REDIS_HOST=proof-queue
+      - REDIS_PORT=6379
+    ports:
+      - "8000:8000"
+    command: ["python", "requestHandler.py", "--redis-host", "proof-queue", "--redis-port", "6379"]
+  verifier-selector:
+    build:
+      context: .
+      dockerfile: Dockerfile.selector
+    container_name: verifier-selector
+    depends_on:
+      - proof-queue
+      - snark-queue
+      - stark-queue
+    environment:
+      - PROOF_HOST=proof-queue
+      - PROOF_PORT=6379
+      - SNARK_HOST=snark-queue
+      - SNARK_PORT=6379
+      - STARK_HOST=stark-queue
+      - STARK_PORT=6379
+    command: ["python", "verifierSelector.py", "--proof-host", "proof-queue", "--proof-port", "6379", "--snark-host", "snark-queue", "--snark-port", "6379", "--stark-host", "stark-queue", "--stark-port", "6379"]
+  snark-verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile.snark
+    container_name: snark-verifier
+    depends_on:
+      - snark-queue
+    environment:
+      - REDIS_HOST=snark-queue
+      - REDIS_PORT=6379
+    command: ["python", "SNARKVerifierWorker.py", "--redis-host", "snark-queue", "--redis-port", "6379"]
+  stark-verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile.stark
+    container_name: stark-verifier
+    depends_on:
+      - stark-queue
+    environment:
+      - REDIS_HOST=stark-queue
+      - REDIS_PORT=6379
+    command: ["python", "STARKVerifierWorker.py", "--redis-host", "stark-queue", "--redis-port", "6379"]

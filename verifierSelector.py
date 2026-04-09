@@ -1,10 +1,21 @@
 import redis
 import json
+import argparse
 
-# Connect to the Redis message broker
-rProofQueue = redis.Redis(host='localhost', port=6379, db=0)
-rSnarkQueue = redis.Redis(host='localhost', port=6380, db=0)
-rStarkQueue = redis.Redis(host='localhost', port=6381, db=0)
+# Parse command-line arguments for Redis hosts and ports
+parser = argparse.ArgumentParser(description="Verifier Selector")
+parser.add_argument('--proof-host', type=str, default='localhost', help='Proof queue Redis host (default: localhost)')
+parser.add_argument('--proof-port', type=int, default=6379, help='Proof queue Redis port (default: 6379)')
+parser.add_argument('--snark-host', type=str, default='localhost', help='SNARK queue Redis host (default: localhost)')
+parser.add_argument('--snark-port', type=int, default=6380, help='SNARK queue Redis port (default: 6380)')
+parser.add_argument('--stark-host', type=str, default='localhost', help='STARK queue Redis host (default: localhost)')
+parser.add_argument('--stark-port', type=int, default=6381, help='STARK queue Redis port (default: 6381)')
+args = parser.parse_args()
+
+# Connect to the Redis message brokers
+rProofQueue = redis.Redis(host=args.proof_host, port=args.proof_port, db=0)
+rSnarkQueue = redis.Redis(host=args.snark_host, port=args.snark_port, db=0)
+rStarkQueue = redis.Redis(host=args.stark_host, port=args.stark_port, db=0)
 
 print("Selector started. Waiting for proofs...")
 

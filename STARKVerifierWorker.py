@@ -1,9 +1,16 @@
 import redis
 import json
 import time
+import argparse
+
+# Parse command-line arguments for Redis host and port
+parser = argparse.ArgumentParser(description="STARK Verifier Worker")
+parser.add_argument('--redis-host', type=str, default='localhost', help='Redis server host (default: localhost)')
+parser.add_argument('--redis-port', type=int, default=6381, help='Redis server port (default: 6381)')
+args = parser.parse_args()
 
 # Connect to the Redis message broker
-rStarkQueue = redis.Redis(host='localhost', port=6381, db=0)
+rStarkQueue = redis.Redis(host=args.redis_host, port=args.redis_port, db=0)
 
 def simulate_verification():
     # Simulate STARK (~200ms) verification time

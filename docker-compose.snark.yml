@@ -1,0 +1,18 @@
+version: '3.8'
+services:
+  snark-queue:
+    image: redis:latest
+    container_name: snark-queue
+    ports:
+      - "6380:6379"
+  snark-verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile.snark
+    container_name: snark-verifier
+    depends_on:
+      - snark-queue
+    environment:
+      - REDIS_HOST=snark-queue
+      - REDIS_PORT=6379
+    command: ["python", "SNARKVerifierWorker.py", "--redis-port", "6379"]
