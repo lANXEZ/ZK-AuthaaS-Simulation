@@ -4,9 +4,9 @@ import { check, sleep } from 'k6';
 // 1. Define the load (VUs = Virtual Users) [cite: 13]
 export const options = {
   stages: [
-    { duration: '2m', target: 100 }, // Ramp up to 100 users [cite: 16, 84]
-    { duration: '5m', target: 100 }, // Stay at 100 users [cite: 17, 84]
-    { duration: '2m', target: 0 },   // Ramp down to 0 users [cite: 18]
+    { duration: '0m', target: 15 }, // Ramp up to 15 users [cite: 16, 84]
+    { duration: '5m', target: 15 }, // Stay at 15 users [cite: 17, 84]
+    { duration: '0m', target: 0 },   // Ramp down to 0 users [cite: 18]
   ],
 };
 
