@@ -1,55 +1,73 @@
-This is the testing of Computer and Communication Security and Cloud Computing project
+## ZK-AuthaaS Simulation: Testing Guide
 
-You may following these steps to run the test.
+This project simulates a scalable zero-knowledge proof verification system using Docker Compose. Follow these steps to build, run, test, and monitor the system.
 
-0. Redis setup (Install Docker Desktop first)(This runs outside the VS Code)
+### 1. Prerequisites
 
-	Open Docker Desktop
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (required)
+- [Node.js](https://nodejs.org/) (for k6 load testing)
+- [k6](https://k6.io/) (install via `npm install -g k6` or from their website)
 
-    Terminal: (First time -> Create Redis database)
+### 2. Build and Start All Services
 
-        docker run -d --name proof-queue -p 6379:6379 redis;
+Open a terminal in this project directory and run:
 
-        docker run -d --name snark-queue -p 6380:6379 redis;
+```
+docker-compose up --build
+```
 
-        docker run -d --name stark-queue -p 6381:6379 redis;
+This will start:
+- Redis queues for proof, SNARK, and STARK
+- The request handler API (FastAPI, port 8000)
+- The verifier selector
+- 10 SNARK and 10 STARK verifier workers (each with their own Redis queue)
 
-    Terminal: (Not first time -> Start the existing Redis)
+You can scale the number of verifiers by editing `docker-compose.yml` and adjusting the `--snark-count` and `--stark-count` arguments and duplicating the relevant service blocks.
 
-        docker start proof-queue
+### 3. Run the Load Test
 
-        docker start snark-queue
+In a separate terminal, run:
 
-        docker start stark-queue
+```
+k6 run load_test.js
+```
 
-1. Activate listener requestHandler api listener
+This will send a high volume of requests to the API at `http://localhost:8000/verify`.
 
-    Terminal:
+### 4. Monitor the Queues
 
-	    uvicorn requestHandler:app --port 8000
+You can check the length of each queue to observe system load and processing:
 
-2. Run requestHandler.py
+**Snapshot (one-time):**
 
-3. Run verifierWorker.py
+```
+docker exec -it proof-queue redis-cli LLEN proof_queue
+docker exec -it snark-queue-1 redis-cli LLEN snark_queue
+docker exec -it stark-queue-1 redis-cli LLEN stark_queue
+```
 
-4. Run k6 to simulate request
+**Real-time (repeat every second):**
 
-    Terminal:
-    	k6 run load_test.js
+```
+docker exec -it proof-queue redis-cli -r -1 -i 1 LLEN proof_queue
+docker exec -it snark-queue-1 redis-cli -r -1 -i 1 LLEN snark_queue
+docker exec -it snark-queue-2 redis-cli -r -1 -i 1 LLEN snark_queue
+... (repeat for all snark-queue-N)
+docker exec -it stark-queue-1 redis-cli -r -1 -i 1 LLEN stark_queue
+docker exec -it stark-queue-2 redis-cli -r -1 -i 1 LLEN stark_queue
+... (repeat for all stark-queue-N)
+```
 
-5. Record stats
+### 5. Stopping the System
 
-    Observe Redis queue
-        Terminal: Snap shot
-            docker exec -it proof-queue redis-cli LLEN proof_queue
+To stop all containers:
 
-            docker exec -it snark-queue redis-cli LLEN snark_queue
+```
+docker-compose down
+```
 
-            docker exec -it stark-queue redis-cli LLEN stark_queue
+### 6. Notes
 
-        Terminal: Real-time
-            docker exec -it proof-queue redis-cli -r -1 -i 1 LLEN proof_queue
-            
-            docker exec -it snark-queue redis-cli -r -1 -i 1 LLEN snark_queue
-            
-            docker exec -it stark-queue redis-cli -r -1 -i 1 LLEN stark_queue
+- All code and service logic is in Python. See the respective `.py` files for details.
+- You can modify the load test in `load_test.js` to change request patterns or payloads.
+- For troubleshooting, check logs with `docker-compose logs -f`.

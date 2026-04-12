@@ -4,8 +4,8 @@ import { check, sleep } from 'k6';
 // 1. Define the load (VUs = Virtual Users) [cite: 13]
 export const options = {
   stages: [
-    { duration: '0m', target: 30 }, // Ramp up to 30 users [cite: 16, 84]
-    { duration: '5m', target: 30 }, // Stay at 30 users [cite: 17, 84]
+    { duration: '0m', target: 400 }, // Ramp up to 400 users [cite: 16, 84]
+    { duration: '5m', target: 400 }, // Stay at 400 users [cite: 17, 84]
     { duration: '0m', target: 0 },   // Ramp down to 0 users [cite: 18]
   ],
 };
@@ -21,7 +21,8 @@ export default function () {
 
   // The payload expected by your worker [cite: 25, 27, 28]
   const payload = JSON.stringify({
-    scheme: scheme, 
+    //scheme: scheme, 
+    scheme: "snark", // For testing, we can fix this to 'snark' [cite: 85]
     proof: "zk_proof_data_here",
     public_inputs: ["input_1", "input_2"]
   });
