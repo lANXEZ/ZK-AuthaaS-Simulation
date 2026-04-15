@@ -101,7 +101,7 @@ def print_snark_pseudo_queue():
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SNARK Queues: {queue_str}")
         time.sleep(1)
 
-threading.Thread(target=print_snark_pseudo_queue, daemon=True).start()
+#threading.Thread(target=print_snark_pseudo_queue, daemon=True).start()
 
 
 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Selector started. Waiting for proofs...")
@@ -112,27 +112,51 @@ while True:
     job = rProofQueue.brpop("proof_queue", timeout=0)
     if not job:
         continue
-    raw_data = job[1]
-    data = json.loads(raw_data)
+        
+    # Unpack the tuple and tell Pylance to ignore the union warning
+    queue_name, raw_data = job  # type: ignore
+    
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Dequeued raw data: {raw_data}")
+    try:
+        data = json.loads(raw_data)
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Parsed data: {data}")
+    except Exception as e:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Malformed JSON discarded: {raw_data} | Error: {e}")
+        continue  # Still dequeued, just skip further processing
 
-    # 3. Logic: Read the "scheme" field to determine which worker should process it
-    if data['scheme'] == "snark" and snark_verifier_amount:
-        # Assign to the snark verifier with the minimum (queue_length + cost * weight)
+    # If this is a wake up request, just throw it away and return true if required
+    if str(data.get('type', '')).lower() == 'wake_up_request' or str(data.get('type', '')).lower() == 'wake up request':
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Wake up request dequeued and discarded: {data}")
+        if data.get('require_return', False):
+            # rProofQueue.lpush('wake_up_response', json.dumps({'result': True}))
+            pass
+        continue
+
+   # 3. Logic: Read the "scheme" field from INSIDE the payload to determine which worker should process it
+    # We use .get('payload', {}) to safely grab the inner dictionary, then .get('scheme')
+    scheme = data.get('payload', {}).get('scheme')
+
+    if scheme == "snark" and snark_verifier_amount:
         min_idx = min(
             range(len(snark_pseudo_queues)),
             key=lambda i: snark_pseudo_queues[i] + snark_costs[i] * SNARK_COST_WEIGHT
         )
         target = snark_verifier_amount[min_idx]
+        
+        # We push the ENTIRE data object (which includes job_id) to the snark queue
         target.lpush("snark_queue", json.dumps(data))
         snark_pseudo_queues[min_idx] += 1
-        # Verifier should publish {"type": "snark", "index": min_idx} to 'verifier_feedback' on completion
-    elif data['scheme'] == "stark" and stark_verifier_amount:
-        # Assign to the stark verifier with the minimum (queue_length + cost * weight)
+        
+    elif scheme == "stark" and stark_verifier_amount:
         min_idx = min(
             range(len(stark_pseudo_queues)),
             key=lambda i: stark_pseudo_queues[i] + stark_costs[i] * STARK_COST_WEIGHT
         )
         target = stark_verifier_amount[min_idx]
+        
         target.lpush("stark_queue", json.dumps(data))
         stark_pseudo_queues[min_idx] += 1
-        # Verifier should publish {"type": "stark", "index": min_idx} to 'verifier_feedback' on completion
+        
+    else:
+        # Added a safety net print statement so if something is wrong, it doesn't fail silently!
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: Unrecognized scheme or no verifiers available: {scheme}")
