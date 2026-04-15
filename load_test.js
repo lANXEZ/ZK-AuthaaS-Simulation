@@ -7,12 +7,33 @@ import { Trend } from 'k6/metrics'; // Imported to track total async time
 const asyncVerificationTime = new Trend('async_verification_time');
 
 // 2. Define the load (VUs = Virtual Users)
+//For stage type load testing, we want to simulate a steady load of 250 concurrent users for 1 minute, which is a common pattern to test system stability under sustained load. The initial ramp-up of 2 seconds allows the system to reach the target load quickly without overwhelming it immediately, and the final stage of 0 seconds with 0 users ensures that all virtual users are stopped immediately after the test duration, allowing us to capture the full processing time for all requests made during the test.
+/*
 export const options = {
   stages: [
-    { duration: '2s', target: 250 },  // Step 1: Baseline load
-    { duration: '1m', target: 250 },  // Step 2: Medium load
-    { duration: '0s', target: 0 },    // Cooldown
+    { duration: '2s', target: 250 }, 
+    { duration: '1m', target: 250 }, 
+    { duration: '0s', target: 0 },    
   ],
+};
+*/
+// Alternative: If you want to process a fixed number of requests (e.g., 500) with a certain level of concurrency (e.g., 50), you can use the 'shared-iterations' executor. This is useful for batch processing tests where you want to ensure a specific number of iterations are completed, regardless of how long they take.
+export const options = {
+  scenarios: {
+    batch_processing_test: {
+      executor: 'shared-iterations',
+      
+      // The total pool of requests you want to process
+      iterations: 500, 
+      
+      // Concurrency: How many requests k6 will keep "in flight" at the same time.
+      vus: 200, 
+      
+      // CRITICAL: k6 defaults to a 10-minute timeout for shared-iterations.
+      // Since ZK math is heavy, give the test plenty of time to finish all 500.
+      maxDuration: '10m', 
+    },
+  },
 };
 
 // 3. What each user does
