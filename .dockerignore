@@ -1,0 +1,6 @@
+# .dockerignore
+load_test.js
+visualize_k6.py
+test_results.csv
+k6_performance_graph.png
+.git

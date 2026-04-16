@@ -1,0 +1,3 @@
+# Ignore k6 performance graph and test results
+k6_performace_graph.png
+test_results.csv

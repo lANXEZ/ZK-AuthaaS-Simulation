@@ -24,7 +24,7 @@ export const options = {
       executor: 'shared-iterations',
       
       // The total pool of requests you want to process
-      iterations: 500, 
+      iterations: 1000, 
       
       // Concurrency: How many requests k6 will keep "in flight" at the same time.
       vus: 200, 
