@@ -1,49 +1,37 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { Trend } from 'k6/metrics'; // Imported to track total async time
+import { Trend } from 'k6/metrics'; 
 
-// 1. Define a Custom Metric
-// This will appear in your CSV exports and terminal output, giving you the true processing latency
 const asyncVerificationTime = new Trend('async_verification_time');
 
-// 2. Define the load (VUs = Virtual Users)
-//For stage type load testing, we want to simulate a steady load of 250 concurrent users for 1 minute, which is a common pattern to test system stability under sustained load. The initial ramp-up of 2 seconds allows the system to reach the target load quickly without overwhelming it immediately, and the final stage of 0 seconds with 0 users ensures that all virtual users are stopped immediately after the test duration, allowing us to capture the full processing time for all requests made during the test.
-/*
-export const options = {
-  stages: [
-    { duration: '2s', target: 250 }, 
-    { duration: '1m', target: 250 }, 
-    { duration: '0s', target: 0 },    
-  ],
-};
-*/
-// Alternative: If you want to process a fixed number of requests (e.g., 500) with a certain level of concurrency (e.g., 50), you can use the 'shared-iterations' executor. This is useful for batch processing tests where you want to ensure a specific number of iterations are completed, regardless of how long they take.
+// ==========================================
+// AWS DEPLOYMENT CONFIGURATION
+// ==========================================
+// REPLACE THIS STRING with the Private IPv4 address of your Backend EC2 instance.
+// e.g., '172.31.45.12'
+const TARGET_IP = 'YOUR_EC2_PRIVATE_IP'; 
+const BASE_URL = `http://${TARGET_IP}:8000`;
+
 export const options = {
   scenarios: {
     batch_processing_test: {
       executor: 'shared-iterations',
-      
-      // The total pool of requests you want to process
       iterations: 1000, 
-      
-      // Concurrency: How many requests k6 will keep "in flight" at the same time.
       vus: 200, 
-      
-      // CRITICAL: k6 defaults to a 10-minute timeout for shared-iterations.
-      // Since ZK math is heavy, give the test plenty of time to finish all 500.
       maxDuration: '10m', 
     },
   },
 };
 
-// 3. What each user does
 export default function () {
-  // NOTE: You must update these URLs to match your actual backend routing
-  const submitUrl = 'http://localhost:8000/verify/submit'; 
+  // FIX 1: Jitter. Staggers the 200 VUs starting exactly at the same millisecond
+  // This prevents the OS from refusing the massive initial TCP connection spike.
+  sleep(Math.random());
 
-  // The payload expected by your worker
+  const submitUrl = `${BASE_URL}/verify/submit`; 
+
   const payload = JSON.stringify({
-    scheme: "snark", // Fixed to 'snark' for this test run
+    scheme: "snark", 
     proof: "zk_proof_data_here",
     public_inputs: ["input_1", "input_2"]
   });
@@ -55,20 +43,16 @@ export default function () {
   // ==========================================
   // PHASE 1: SUBMIT TO REDIS QUEUE
   // ==========================================
-  const startTime = Date.now(); // Start the stopwatch
+  const startTime = Date.now(); 
   
   const submitRes = http.post(submitUrl, payload, params);
   
-  // Check if the server accepted the payload into the queue (often a 202 or 200 status)
   check(submitRes, { 'accepted by queue': (r) => r.status === 202 || r.status === 200 });
   
-  // Extract the tracking ID. 
-  // NOTE: Change 'job_id' to whatever key your API actually returns.
   let jobId;
   try {
     jobId = submitRes.json('job_id');
   } catch (e) {
-    // If the server fails under load and doesn't return JSON, exit this iteration safely
     return; 
   }
 
@@ -78,19 +62,23 @@ export default function () {
   let isDone = false;
   let attempts = 0;
   let finalStatus = '';
-  const maxAttempts = 30; // Max 60 seconds of waiting (30 attempts * 2s sleep)
+  
+  // FIX 2: Increased max attempts because our sleep time is shorter now.
+  // 120 attempts * ~1 average second = ~120 seconds of maximum waiting.
+  const maxAttempts = 120; 
 
   while (!isDone && attempts < maxAttempts) {
-    sleep(2); // Crucial: Wait 2 seconds so we don't DDoS our own backend
+    // FIX 3: Desynchronized Polling to fix the broken graph lines!
+    // Sleeps for a random amount of time between 0.5s and 1.5s
+    sleep(0.5 + Math.random()); 
     
-    // NOTE: Update this URL to match your status checking endpoint
-    const checkUrl = `http://localhost:8000/verify/status/${jobId}`;
+    const checkUrl = `${BASE_URL}/verify/status/${jobId}`;
     const checkRes = http.get(checkUrl);
     
     try {
-      finalStatus = checkRes.json('status'); // Expected to return 'pending', 'processing', 'completed', or 'failed'
+      finalStatus = checkRes.json('status'); 
     } catch (e) {
-       finalStatus = 'error'; // Catch server timeouts during heavy load
+       finalStatus = 'error'; 
     }
 
     if (finalStatus === 'completed' || finalStatus === 'failed') {
@@ -105,12 +93,10 @@ export default function () {
   const endTime = Date.now();
   const totalProcessingTime = endTime - startTime;
 
-  // Only record the time if the ZK math actually finished successfully
   if (finalStatus === 'completed') {
-    asyncVerificationTime.add(totalProcessingTime); // Add to our custom metric!
+    asyncVerificationTime.add(totalProcessingTime); 
   }
 
-  // Check if the worker successfully verified it before giving up
   check(finalStatus, { 
     'verification fully completed': (s) => s === 'completed' 
   });
