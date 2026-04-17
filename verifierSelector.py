@@ -1,75 +1,70 @@
 import redis
 import json
 import argparse
-
-# Parse command-line arguments for Redis hosts and ports
-parser = argparse.ArgumentParser(description="Verifier Selector")
-parser.add_argument('--proof-host', type=str, default='localhost', help='Proof queue Redis host (default: localhost)')
-parser.add_argument('--proof-port', type=int, default=6379, help='Proof queue Redis port (default: 6379)')
-
-
-parser.add_argument('--snark-queues', type=str, default='', help='Comma-separated list of SNARK queue host:port (overrides --snark-count)')
-parser.add_argument('--stark-queues', type=str, default='', help='Comma-separated list of STARK queue host:port (overrides --stark-count)')
-parser.add_argument('--snark-count', type=int, default=0, help='Number of SNARK verifiers (auto-generate as snark_verifier_{i}:6379)')
-parser.add_argument('--stark-count', type=int, default=0, help='Number of STARK verifiers (auto-generate as stark_verifier_{i}:6379)')
-args = parser.parse_args()
-
-
-# Connect to the Redis message brokers
-rProofQueue = redis.Redis(host=args.proof_host, port=args.proof_port, db=0)
-
-# Parse SNARK and STARK queues
-
-def parse_queues(queue_str):
-    queues = []
-    for qp in queue_str.split(","):
-        qp = qp.strip()
-        if not qp:
-            continue
-        if ":" in qp:
-            host, port = qp.split(":")
-            queues.append(redis.Redis(host=host, port=int(port), db=0))
-    return queues
-
-# Generate queue addresses if count is provided and no explicit queues are given
-def generate_queues(prefix, count, default_port=6379):
-    # Use dash-separated hostnames to match docker-compose service names
-    return [redis.Redis(host=f"{prefix}-queue-{i+1}", port=default_port, db=0) for i in range(count)]
-
-
-if args.snark_queues:
-    snark_verifier_amount = parse_queues(args.snark_queues)
-elif args.snark_count > 0:
-    snark_verifier_amount = generate_queues("snark", args.snark_count)
-else:
-    snark_verifier_amount = []
-
-if args.stark_queues:
-    stark_verifier_amount = parse_queues(args.stark_queues)
-elif args.stark_count > 0:
-    stark_verifier_amount = generate_queues("stark", args.stark_count)
-else:
-    stark_verifier_amount = []
-
-
-
-
-# Pseudo queue lengths for each verifier (feedback-based)
 import threading
 import time
 
-# Assign cost to each verifier node (customize as needed)
-snark_costs = [1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 8.0, 8.0, 8.0, 10.0]
-stark_costs = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+# ==========================================
+# Verifier Selector (Swarm-friendly version)
+# ==========================================
+# This version connects to ONE Redis per verifier type (snark-queue, stark-queue)
+# instead of one Redis per verifier node. Each verifier reads from a dedicated
+# key like "snark_queue:{index}" on the shared Redis.
+
+parser = argparse.ArgumentParser(description="Verifier Selector")
+parser.add_argument('--proof-host', type=str, default='proof-queue',
+                    help='Proof queue Redis host')
+parser.add_argument('--proof-port', type=int, default=6379,
+                    help='Proof queue Redis port')
+parser.add_argument('--snark-host', type=str, default='snark-queue',
+                    help='Shared SNARK queue Redis host')
+parser.add_argument('--snark-port', type=int, default=6379,
+                    help='Shared SNARK queue Redis port')
+parser.add_argument('--stark-host', type=str, default='stark-queue',
+                    help='Shared STARK queue Redis host')
+parser.add_argument('--stark-port', type=int, default=6379,
+                    help='Shared STARK queue Redis port')
+parser.add_argument('--snark-count', type=int, default=10,
+                    help='Number of SNARK verifier replicas (matches deploy.replicas)')
+parser.add_argument('--stark-count', type=int, default=10,
+                    help='Number of STARK verifier replicas (matches deploy.replicas)')
+args = parser.parse_args()
+
+# ------------------------------------------
+# Redis connections (one per logical broker)
+# ------------------------------------------
+rProofQueue = redis.Redis(host=args.proof_host, port=args.proof_port, db=0)
+rSnarkQueue = redis.Redis(host=args.snark_host, port=args.snark_port, db=0)
+rStarkQueue = redis.Redis(host=args.stark_host, port=args.stark_port, db=0)
+
+snark_count = args.snark_count
+stark_count = args.stark_count
+
+# ------------------------------------------
+# Cost vectors
+# ------------------------------------------
+# Base patterns - extend or replace with auto-generated profiles for large N.
+snark_costs_base = [1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 8.0, 8.0, 8.0, 10.0]
+stark_costs_base = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+def build_cost_vector(base, count):
+    """Cycle the base pattern to cover `count` nodes (simple scaling fallback)."""
+    return [base[i % len(base)] for i in range(count)]
+
+snark_costs = build_cost_vector(snark_costs_base, snark_count)
+stark_costs = build_cost_vector(stark_costs_base, stark_count)
 
 # Adjustable weight for cost influence
-SNARK_COST_WEIGHT = 100.0  # Change this to tune balancing
+SNARK_COST_WEIGHT = 100.0
 STARK_COST_WEIGHT = 1.0
 
-snark_pseudo_queues = [0 for _ in range(len(snark_verifier_amount))]
-stark_pseudo_queues = [0 for _ in range(len(stark_verifier_amount))]
+# Pseudo queue lengths - updated by feedback from workers
+snark_pseudo_queues = [0 for _ in range(snark_count)]
+stark_pseudo_queues = [0 for _ in range(stark_count)]
 
-# Feedback listener: expects verifiers to publish to 'verifier_feedback' channel with payload {"type": "snark"/"stark", "index": i}
+# ------------------------------------------
+# Feedback listener (unchanged logic)
+# ------------------------------------------
 def feedback_listener():
     pubsub = rProofQueue.pubsub()
     pubsub.subscribe('verifier_feedback')
@@ -89,11 +84,11 @@ def feedback_listener():
         except Exception as e:
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Feedback listener error: {e}")
 
-
-# Start feedback listener thread
 threading.Thread(target=feedback_listener, daemon=True).start()
 
-# SNARK pseudo queue printer thread
+# ------------------------------------------
+# (Optional) Pseudo queue printer for debugging
+# ------------------------------------------
 def print_snark_pseudo_queue():
     while True:
         if snark_pseudo_queues:
@@ -101,62 +96,52 @@ def print_snark_pseudo_queue():
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SNARK Queues: {queue_str}")
         time.sleep(1)
 
-#threading.Thread(target=print_snark_pseudo_queue, daemon=True).start()
+# Uncomment if you want live queue depth logs:
+# threading.Thread(target=print_snark_pseudo_queue, daemon=True).start()
 
+print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Selector started. "
+      f"SNARK={snark_count} nodes, STARK={stark_count} nodes. Waiting for proofs...")
 
-print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Selector started. Waiting for proofs...")
-
+# ------------------------------------------
+# Main dispatch loop
+# ------------------------------------------
 while True:
-    # NOTE: This code expects the synchronous redis-py client.
-    # If you are using aioredis or another async client, you must use 'await' and run this in an async function.
     job = rProofQueue.brpop("proof_queue", timeout=0)
     if not job:
         continue
-        
-    # Unpack the tuple and tell Pylance to ignore the union warning
+
     queue_name, raw_data = job  # type: ignore
-    
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Dequeued raw data: {raw_data}")
+
     try:
         data = json.loads(raw_data)
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Parsed data: {data}")
     except Exception as e:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Malformed JSON discarded: {raw_data} | Error: {e}")
-        continue  # Still dequeued, just skip further processing
-
-    # If this is a wake up request, just throw it away and return true if required
-    if str(data.get('type', '')).lower() == 'wake_up_request' or str(data.get('type', '')).lower() == 'wake up request':
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Wake up request dequeued and discarded: {data}")
-        if data.get('require_return', False):
-            # rProofQueue.lpush('wake_up_response', json.dumps({'result': True}))
-            pass
         continue
 
-   # 3. Logic: Read the "scheme" field from INSIDE the payload to determine which worker should process it
-    # We use .get('payload', {}) to safely grab the inner dictionary, then .get('scheme')
+    # Handle wake-up requests
+    if str(data.get('type', '')).lower() in ('wake_up_request', 'wake up request'):
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Wake up request discarded: {data}")
+        continue
+
+    # Pick a verifier based on scheme + weighted-cost load balancing
     scheme = data.get('payload', {}).get('scheme')
 
-    if scheme == "snark" and snark_verifier_amount:
+    if scheme == "snark" and snark_count > 0:
         min_idx = min(
-            range(len(snark_pseudo_queues)),
+            range(snark_count),
             key=lambda i: snark_pseudo_queues[i] + snark_costs[i] * SNARK_COST_WEIGHT
         )
-        target = snark_verifier_amount[min_idx]
-        
-        # We push the ENTIRE data object (which includes job_id) to the snark queue
-        target.lpush("snark_queue", json.dumps(data))
+        # Push to this specific node's dedicated key on the shared SNARK Redis
+        rSnarkQueue.lpush(f"snark_queue:{min_idx}", json.dumps(data))
         snark_pseudo_queues[min_idx] += 1
-        
-    elif scheme == "stark" and stark_verifier_amount:
+
+    elif scheme == "stark" and stark_count > 0:
         min_idx = min(
-            range(len(stark_pseudo_queues)),
+            range(stark_count),
             key=lambda i: stark_pseudo_queues[i] + stark_costs[i] * STARK_COST_WEIGHT
         )
-        target = stark_verifier_amount[min_idx]
-        
-        target.lpush("stark_queue", json.dumps(data))
+        rStarkQueue.lpush(f"stark_queue:{min_idx}", json.dumps(data))
         stark_pseudo_queues[min_idx] += 1
-        
+
     else:
-        # Added a safety net print statement so if something is wrong, it doesn't fail silently!
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: Unrecognized scheme or no verifiers available: {scheme}")
