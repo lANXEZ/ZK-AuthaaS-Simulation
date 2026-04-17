@@ -125,8 +125,8 @@ services:
       # the worker converts it to a 0-based index internally.
       - TASK_SLOT={{.Task.Slot}}
     command:
-      - "python"
-      - "SNARKVerifierWorker.py"
+      - "node"
+      - "SNARKVerifierWorker.js"
       - "--redis-host"
       - "snark-queue"
       - "--redis-port"
@@ -140,7 +140,7 @@ services:
       resources:
         limits:
           cpus: '0.15'
-          memory: 200M
+          memory: 384M
     networks:
       - zk-net
 

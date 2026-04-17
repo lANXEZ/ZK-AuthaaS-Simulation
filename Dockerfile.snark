@@ -1,14 +1,6 @@
-# Use the official Python image as a base
-FROM python:3.10-slim
-
-# Set the working directory
+FROM node:18-slim
 WORKDIR /app
-
-# Copy the verifier worker script into the container
-COPY SNARKVerifierWorker.py ./
-
-# Install required Python packages
-RUN pip install redis
-
-# Set the default command to run the worker
-CMD ["python", "SNARKVerifierWorker.py"]
+COPY SNARKVerifierWorker.js ./
+COPY verification_key.json ./
+RUN npm init -y && npm install snarkjs ioredis
+CMD ["node", "SNARKVerifierWorker.js"]

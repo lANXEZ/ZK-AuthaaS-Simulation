@@ -75,6 +75,45 @@ export const options = {
 };
 
 // ------------------------------------------
+// Static SNARK proof/public signals (same valid proof reused every request)
+// Sourced from verification_key.json / proof.json / public.json
+// ------------------------------------------
+const SNARK_PROOF = {
+  pi_a: [
+    "16893334615242764580836222078829142520432756203770466604081032720388657032757",
+    "5095606969395716303621702958471922376961618029789842152295821108717087682311",
+    "1"
+  ],
+  pi_b: [
+    [
+      "13772398192624595577472662855811728500397412494267729711099372526485968374649",
+      "15249941699599606024139723272508104548269790148997217612719623411267570558493"
+    ],
+    [
+      "19735295879188043871505513529932228526631701925990878770250928234435443795397",
+      "11046809327765151786114304454515091703284305019483922364766276175300463695885"
+    ],
+    ["1", "0"]
+  ],
+  pi_c: [
+    "18536201733965390491456176988021021022761142364866628667452517360063595662975",
+    "15291715715367874403418883228408929985980666544091293542955491873294267230352",
+    "1"
+  ],
+  protocol: "groth16",
+  curve: "bn128"
+};
+
+const SNARK_PUBLIC_SIGNALS = [
+  "1120771572304984668855649788542860110303223894298952018121329196339919157573",
+  "20197087425205130352574209034729275460185533126585197591053247747830393653846",
+  "111222333",
+  "444555666",
+  "1764263975784332459809300572476310454427845461305579380554772042455913567929",
+  "10988278040513707334400680073433620711051179041727267619401283491695328957763"
+];
+
+// ------------------------------------------
 // Main VU function
 // ------------------------------------------
 export default function () {
@@ -87,11 +126,12 @@ export default function () {
   const scheme = 'snark'; // For pure SNARK testing, uncomment this line and comment the above line.
 
   const submitUrl = `${BASE_URL}/verify/submit`;
-  const payload = JSON.stringify({
-    scheme: scheme,
-    proof: 'zk_proof_data_here',
-    public_inputs: ['input_1', 'input_2'],
-  });
+
+  const payload = JSON.stringify(
+    scheme === 'snark'
+      ? { scheme, proof: SNARK_PROOF, public_inputs: SNARK_PUBLIC_SIGNALS }
+      : { scheme, proof: 'zk_proof_data_here', public_inputs: ['input_1', 'input_2'] }
+  );
   const params = {
     headers: { 'Content-Type': 'application/json' },
   };
