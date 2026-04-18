@@ -83,7 +83,42 @@ Copy the load test from your laptop (run on laptop):
 scp -i zk-authaas-key.pem load_test.js ubuntu@<k6-public-ip>:~/load_test.js
 ```
 
-### 5. Run the test
+### 5. Scale verifiers and sync the selector
+
+The stack deploys with 10+10 verifiers by default. Before running a real experiment, scale up and tell the selector the new count.
+
+**Scale the worker pools:**
+```bash
+docker service scale zk_snark-verifier=50 zk_stark-verifier=50
+```
+
+**Update the selector to match** (this restarts only the selector container):
+```bash
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50" \
+  zk_verifier-selector
+```
+
+> Replace both `50` values with whatever replica count you scaled to. The `--args` flag replaces the entire command, so all arguments must be present — only change the numbers at the end.
+
+**Verify the selector started with the right count:**
+```bash
+docker service logs zk_verifier-selector --tail 1
+# Must print: "Selector started. SNARK=50 nodes, STARK=50 nodes. Waiting for proofs..."
+```
+
+**Why this matters:** the selector keeps an in-memory scoreboard with one slot per worker. If you scale to 50 workers but the selector still thinks there are 10, workers 10–49 will never receive any jobs. The k6 results will look wrong and there will be no error message to tell you why.
+
+**Sanity check before every test run:**
+```bash
+docker service ls --format "table {{.Name}}\t{{.Replicas}}"
+docker service logs zk_verifier-selector --tail 1
+# The replica counts and the selector log must agree.
+```
+
+---
+
+### 6. Run the test
 
 On the k6 EC2 — always use the backend's **private IP**:
 ```bash
@@ -96,7 +131,7 @@ k6 run \
   --out csv=test_results.csv
 ```
 
-### 6. Collect results
+### 7. Collect results
 
 ```bash
 # On your laptop:
@@ -104,7 +139,7 @@ scp -i zk-authaas-key.pem ubuntu@<k6-public-ip>:~/test_results.csv ./test_result
 python visualize_k6.py
 ```
 
-### 7. TEAR DOWN — do this every session, no exceptions
+### 8. TEAR DOWN — do this every session, no exceptions
 
 On the backend EC2:
 ```bash
@@ -124,13 +159,25 @@ A forgotten `c5.4xlarge` left running overnight costs ~$16. Left for a week: ~$1
 
 ## Scale reference
 
-| Verifier count | Command |
-|---|---|
-| 10 + 10 (default) | *(no change needed)* |
-| 50 + 50 | `docker service scale zk_snark-verifier=50 zk_stark-verifier=50` |
-| 500 + 500 | `docker service scale zk_snark-verifier=500 zk_stark-verifier=500` · switch to `c5.24xlarge` |
+Always run both commands together — scale the workers, then sync the selector.
 
-> After scaling, update `--snark-count` / `--stark-count` in the selector and redeploy the stack.
+**10 + 10 (default, already set at deploy — no action needed)**
+
+**50 + 50:**
+```bash
+docker service scale zk_snark-verifier=50 zk_stark-verifier=50
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50" \
+  zk_verifier-selector
+```
+
+**500 + 500 (switch to `c5.24xlarge` first):**
+```bash
+docker service scale zk_snark-verifier=500 zk_stark-verifier=500
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 500 --stark-count 500" \
+  zk_verifier-selector
+```
 
 ## Cost reference
 
