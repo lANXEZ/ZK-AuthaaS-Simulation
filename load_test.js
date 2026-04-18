@@ -44,7 +44,7 @@ const STARK_RATIO = parseFloat(__ENV.STARK_RATIO || '0.5');
 // Load profile
 const VUS = parseInt(__ENV.VUS || '300');
 const ITERATIONS = parseInt(__ENV.ITERATIONS || '3000');
-const MAX_DURATION = __ENV.MAX_DURATION || '10m';
+const MAX_DURATION = __ENV.MAX_DURATION || '15m';
 
 // ------------------------------------------
 // Custom metrics
