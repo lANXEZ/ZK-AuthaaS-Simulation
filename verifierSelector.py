@@ -44,7 +44,7 @@ stark_count = args.stark_count
 # Cost vectors
 # ------------------------------------------
 # Base patterns - extend or replace with auto-generated profiles for large N.
-snark_costs_base = [1.0, 1.0, 1.0, 5.0, 5.0, 5.0, 8.0, 8.0, 8.0, 10.0]
+snark_costs_base = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 stark_costs_base = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 def build_cost_vector(base, count):
@@ -55,7 +55,7 @@ snark_costs = build_cost_vector(snark_costs_base, snark_count)
 stark_costs = build_cost_vector(stark_costs_base, stark_count)
 
 # Adjustable weight for cost influence
-SNARK_COST_WEIGHT = 100.0
+SNARK_COST_WEIGHT = 1.0
 STARK_COST_WEIGHT = 1.0
 
 # Pseudo queue lengths - updated by feedback from workers

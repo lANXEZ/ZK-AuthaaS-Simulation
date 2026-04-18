@@ -1,175 +1,151 @@
-# AWS EC2 Spot + Docker Swarm Setup Checklist
+# AWS EC2 Setup Checklist — ZK-AuthaaS Simulation
 
-For the ZK-AuthaaS Simulation project. Target audience: student team on a tight budget. Assumes you already have an AWS account.
+Quick-reference checklist for each experiment session. For the full walkthrough with explanations, see **Section 9 of `README.md`**.
 
----
-
-## 0. Before you start (one-time, do this once per team)
-
-- Create an AWS account. Check for credits through **AWS Educate**, **GitHub Student Pack**, or your university's **AWS Academy** partnership — these often provide $100+ in credits.
-- In the AWS Console, go to **Billing → Budgets** and set an alert at **$20** and another at **$50**. AWS will email you the moment you cross either.
-- Create an **IAM user** for yourself (don't use the root account for daily work). Give it `AmazonEC2FullAccess` for this project.
-- Install the AWS CLI locally (`aws configure`) and generate an **SSH key pair** in your target region (EC2 → Key Pairs → Create). Download the `.pem` file and `chmod 400` it.
-- Pick **one region** and stick with it. `us-east-1` is usually cheapest. Record it.
+This project runs on a **paid-tier AWS account** (professor-provided). Confirm with the account holder that the account is active and check the current billing balance before starting.
 
 ---
 
-## 1. Launch a spot instance (do this at the start of each experiment session)
+## Before your first session (one-time)
 
-1. EC2 Console → **Launch Instance** → switch to **Spot** request under Advanced Details.
-2. **AMI**: Amazon Linux 2023 or Ubuntu 22.04 (either works).
-3. **Instance type**:
-   - Phase 2 (50+50 verifiers, development): `c5.4xlarge` (16 vCPU, 32GB) — spot ~$0.15–0.25/hr
-   - Phase 3 (500+500 verifiers, full experiments): `c5.24xlarge` (96 vCPU, 192GB) — spot ~$1.00–1.80/hr
-4. **Key pair**: select the one you generated in step 0.
-5. **Security group**: create a new one named `zk-authaas-sg` with these inbound rules:
-   - SSH (port 22) from **My IP** only
-   - Custom TCP (port 8000) from **My IP** only — this is for k6 hitting the API
-   - Leave all other ports closed
-6. **Storage**: 30GB gp3 is plenty.
-7. **Spot request type**: One-time (not persistent) — simpler for short experiments.
-8. Launch. Wait for the instance to reach "running" and note the **Public IPv4**.
+- [ ] Receive AWS Console access from the account holder (IAM user, not root)
+- [ ] Confirm the IAM user has `AmazonEC2FullAccess`
+- [ ] Set a **billing alert at $20** in AWS Billing → Budgets
+- [ ] Pick one region and record it — use it for every resource (`us-east-1` recommended)
+- [ ] **EC2 → Key Pairs → Create** — name it `zk-authaas-key`, download the `.pem`, run `chmod 400 zk-authaas-key.pem`
 
 ---
 
-## 2. Connect and install Docker
+## Each experiment session
+
+### 1. Launch both EC2 instances
+
+**Backend (one per session):**
+- [ ] EC2 → Launch Instance
+- [ ] Name: `zk-authaas-backend` · AMI: Ubuntu 22.04 LTS · Type: `c5.4xlarge`
+- [ ] Key pair: `zk-authaas-key`
+- [ ] Security group `zk-authaas-backend-sg`: SSH (22) from My IP · TCP 8000 from My IP
+- [ ] Storage: 30 GB gp3
+- [ ] Record **Public IPv4** and **Private IPv4**
+
+**k6 loader (one per session):**
+- [ ] EC2 → Launch Instance
+- [ ] Name: `zk-authaas-k6` · AMI: Ubuntu 22.04 LTS · Type: `t3.small`
+- [ ] Key pair: `zk-authaas-key`
+- [ ] **VPC and Subnet: same as backend** (match the AZ exactly)
+- [ ] Security group `zk-authaas-k6-sg`: SSH (22) from My IP only
+- [ ] Storage: 8 GB gp3
+- [ ] Record **Private IPv4**
+
+### 2. Allow k6 → backend traffic
+
+- [ ] Security Groups → `zk-authaas-backend-sg` → Inbound rules → Add rule:
+  - Custom TCP · Port 8000 · Source: `<k6-private-ip>/32`
+
+### 3. Set up the backend EC2
 
 ```bash
-ssh -i your-key.pem ec2-user@<public-ip>       # Amazon Linux 2023
-# or ubuntu@<public-ip> for Ubuntu
-
-# Amazon Linux 2023:
-sudo dnf install -y docker git
+ssh -i zk-authaas-key.pem ubuntu@<backend-public-ip>
+sudo apt update && sudo apt install -y docker.io git
 sudo systemctl enable --now docker
-sudo usermod -aG docker ec2-user
-exit      # then SSH back in so the group change takes effect
-```
+sudo usermod -aG docker ubuntu
+exit
 
-Verify: `docker ps` should work without sudo.
-
----
-
-## 3. Get your code onto the instance
-
-```bash
-git clone <your-repo-url> zk-authaas
-cd zk-authaas
-```
-
-If the repo is private, either push to a public fork temporarily, use `scp`, or set up a deploy key.
-
----
-
-## 4. Initialize Swarm and adjust the compose file
-
-```bash
+ssh -i zk-authaas-key.pem ubuntu@<backend-public-ip>
+git clone <your-repo-url> zk-authaas && cd zk-authaas
 docker swarm init
-```
-
-Modify `docker-compose.yml` so the verifier services use Swarm's `deploy.replicas` instead of duplicated service blocks. Example snippet:
-
-```yaml
-snark_verifier:
-  image: zk/snark_verifier:latest
-  command: ["python", "SNARKVerifierWorker.py", "--redis-host", "snark-queue", "--index", "{{.Task.Slot}}"]
-  deploy:
-    replicas: 50          # bump to 500 for Phase 3
-    resources:
-      limits:
-        cpus: '0.15'
-        memory: 200M
-```
-
-Two important notes:
-- Swarm uses `docker stack deploy`, which ignores `build:` directives — build images first with `docker compose build` and push to a local registry, or change `image:` to a pre-built one.
-- `{{.Task.Slot}}` gives each replica a unique index (1..N), which you can pass to your worker's `--index` argument.
-
----
-
-## 5. Deploy
-
-```bash
-docker compose build          # build images locally first
+docker compose build
 docker stack deploy -c docker-compose.yml zk
-docker service ls             # confirm all services are running
-docker service logs zk_request_handler -f   # tail logs to check for errors
+docker service ls   # wait until all replicas show target/target
 ```
 
-To scale up/down on the fly:
+Sanity check:
 ```bash
-docker service scale zk_snark_verifier=500 zk_stark_verifier=500
+curl -s -X POST http://localhost:8000/verify/submit \
+  -H "Content-Type: application/json" \
+  -d '{"scheme":"stark","proof":"x","public_inputs":["a"]}' | python3 -m json.tool
+# Expected: {"status": "accepted", "job_id": "..."}
 ```
 
----
+### 4. Set up the k6 EC2
 
-## 6. Run the load test
-
-Edit `load_test.js` on your **local machine** (not the EC2):
-```js
-const TARGET_IP = '<EC2 public IP>';
-```
-
-Then from your laptop:
 ```bash
-k6 run load_test.js --out csv=test_results.csv
+ssh -i zk-authaas-key.pem ubuntu@<k6-public-ip>
+sudo apt update && sudo apt install -y gpg curl
+curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/k6.list
+sudo apt update && sudo apt install -y k6
 ```
 
-Copy results back locally if the test ran on the instance:
+Copy the load test from your laptop (run on laptop):
 ```bash
-scp -i your-key.pem ec2-user@<ip>:~/zk-authaas/test_results.csv ./
+scp -i zk-authaas-key.pem load_test.js ubuntu@<k6-public-ip>:~/load_test.js
+```
+
+### 5. Run the test
+
+On the k6 EC2 — always use the backend's **private IP**:
+```bash
+k6 run \
+  -e TARGET=<backend-private-ip> \
+  -e VUS=200 \
+  -e ITERATIONS=5000 \
+  -e STARK_RATIO=0.0 \
+  load_test.js \
+  --out csv=test_results.csv
+```
+
+### 6. Collect results
+
+```bash
+# On your laptop:
+scp -i zk-authaas-key.pem ubuntu@<k6-public-ip>:~/test_results.csv ./test_results.csv
 python visualize_k6.py
 ```
 
----
+### 7. TEAR DOWN — do this every session, no exceptions
 
-## 7. TEAR DOWN (do this every single time, no exceptions)
-
+On the backend EC2:
 ```bash
 docker stack rm zk
 exit
 ```
 
-Then in the AWS Console:
-- EC2 → Instances → select your instance → **Instance State → Terminate**
+AWS Console:
+- [ ] EC2 → Instances → select `zk-authaas-backend` **and** `zk-authaas-k6`
+- [ ] Instance State → **Terminate**
+- [ ] Wait for both to show `terminated`
+- [ ] Confirm EC2 dashboard shows **0 running instances**
 
-Terminating (not just stopping) a spot instance costs you nothing further. A stopped spot instance might still incur EBS storage fees.
-
-Double-check the EC2 dashboard shows zero running instances before you close the tab. This is the single most important habit for keeping your bill near zero.
-
----
-
-## Cost tracking cheatsheet
-
-| Session type              | Instance        | Duration | Approx cost |
-|---------------------------|-----------------|----------|-------------|
-| Dev validation (50+50)    | c5.4xlarge spot | 2 hrs    | ~$0.40      |
-| Full experiment (500+500) | c5.24xlarge spot| 2 hrs    | ~$3–6       |
-| Full paper (5–10 runs)    | c5.24xlarge spot| 15 hrs   | ~$25–50     |
-
-Everything local (laptop docker-compose with 10+10) is free, and you should iterate there as much as possible before paying for cloud compute.
+A forgotten `c5.4xlarge` left running overnight costs ~$16. Left for a week: ~$115.
 
 ---
 
-## Common pitfalls
+## Scale reference
 
-- **Spot interruption mid-experiment**: happens occasionally. You get a 2-min warning. Just restart and re-run; it's not a disaster for short experiments.
-- **"Cannot connect to Docker daemon"**: you forgot to log out and back in after `usermod -aG docker`.
-- **k6 getting connection refused**: security group doesn't allow your IP on port 8000, or the request handler container isn't up yet.
-- **Swarm services stuck "pending"**: usually means CPU/memory overcommit. Check `docker service ps <service>` and reduce `replicas` or resource limits.
-- **Forgot to terminate for a weekend**: a `c5.24xlarge` on-demand (not spot) for 48 hours is ~$200. This is why the billing alert matters.
+| Verifier count | Command |
+|---|---|
+| 10 + 10 (default) | *(no change needed)* |
+| 50 + 50 | `docker service scale zk_snark-verifier=50 zk_stark-verifier=50` |
+| 500 + 500 | `docker service scale zk_snark-verifier=500 zk_stark-verifier=500` · switch to `c5.24xlarge` |
 
----
+> After scaling, update `--snark-count` / `--stark-count` in the selector and redeploy the stack.
 
-## One-time-per-team optional upgrade
+## Cost reference
 
-If you find yourselves doing many experiments, write a small **teardown script** that your team runs at the end of every session:
+| Instance | Type | On-demand | 2 hr session |
+|---|---|---|---|
+| Backend | c5.4xlarge | ~$0.68/hr | ~$1.36 |
+| k6 | t3.small | ~$0.02/hr | ~$0.04 |
+| **Total** | | | **~$1.40** |
 
-```bash
-#!/bin/bash
-INSTANCE_ID=$(aws ec2 describe-instances \
-  --filters "Name=tag:Project,Values=zk-authaas" "Name=instance-state-name,Values=running" \
-  --query 'Reservations[].Instances[].InstanceId' --output text)
-aws ec2 terminate-instances --instance-ids $INSTANCE_ID
-```
+## Common issues
 
-Tag your instance with `Project=zk-authaas` when launching and this will clean everything up with one command.
+| Symptom | Fix |
+|---|---|
+| `Cannot connect to Docker daemon` | Forgot to re-login after `usermod -aG docker`. SSH out and back in. |
+| SNARK services stuck at `0/10` | Memory overcommit — check `docker service ps zk_snark-verifier --no-trunc`. Reduce replicas or raise the `memory` limit in `docker-compose.yml`. |
+| `Error: Invalid proof` in SNARK worker logs | `verification_key.json` mismatch — rebuild the image: `docker compose build --no-cache` |
+| k6 `connection refused` on port 8000 | Security group missing the k6 private IP rule (Step 2), or using public IP instead of private IP. |
+| Swarm services stuck `pending` | CPU/memory overcommit. Check `docker service ps` and reduce replicas or resource limits. |
