@@ -44,8 +44,8 @@ stark_count = args.stark_count
 # Cost vectors
 # ------------------------------------------
 # Base patterns - extend or replace with auto-generated profiles for large N.
-snark_costs_base = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-stark_costs_base = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+snark_costs_base = [1.0]
+stark_costs_base = [1.0]
 
 def build_cost_vector(base, count):
     """Cycle the base pattern to cover `count` nodes (simple scaling fallback)."""
