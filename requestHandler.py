@@ -60,6 +60,34 @@ async def check_status(job_id: str):
     return {"job_id": job_id, "status": job_status}
 
 
+# ==========================================
+# ENDPOINT 3: Cost Statistics
+# ==========================================
+# Read running cost totals written by the selector into proof-queue Redis.
+# Used by sweep_throughput.py to record avg cost per job in the sweep CSV.
+# Query before and after a k6 run; the delta gives per-run cost.
+@app.get("/stats/cost")
+async def get_cost_stats():
+    _snark_cost = rProofQueue.get("selector:snark_total_cost")
+    _snark_jobs = rProofQueue.get("selector:snark_total_jobs")
+    _stark_cost = rProofQueue.get("selector:stark_total_cost")
+    _stark_jobs = rProofQueue.get("selector:stark_total_jobs")
+
+    snark_cost = float(_snark_cost) if _snark_cost is not None else 0.0  # type: ignore[arg-type]
+    snark_jobs = int(_snark_jobs)   if _snark_jobs is not None else 0    # type: ignore[arg-type]
+    stark_cost = float(_stark_cost) if _stark_cost is not None else 0.0  # type: ignore[arg-type]
+    stark_jobs = int(_stark_jobs)   if _stark_jobs is not None else 0    # type: ignore[arg-type]
+
+    return {
+        "snark_total_cost": round(snark_cost, 4),
+        "snark_total_jobs": snark_jobs,
+        "snark_avg_cost_per_job": round(snark_cost / snark_jobs, 4) if snark_jobs > 0 else 0,
+        "stark_total_cost": round(stark_cost, 4),
+        "stark_total_jobs": stark_jobs,
+        "stark_avg_cost_per_job": round(stark_cost / stark_jobs, 4) if stark_jobs > 0 else 0,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("requestHandler:app", host="0.0.0.0", port=8000, reload=False)

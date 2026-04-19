@@ -26,7 +26,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 ### For AWS deployment
 
-Two EC2 instances are required (see [Section 9](#9-deploying-on-aws)):
+Two EC2 instances are required (see [Section 10](#10-deploying-on-aws)):
 
 | Instance | Role | Suggested type |
 |---|---|---|
@@ -200,7 +200,201 @@ python visualize_sweep.py   # produces sweep_throughput_graph.png
 
 ---
 
-## 7. Visualize a Single Load-Test Run
+## 7. Compare Routing Algorithms (local)
+
+This is the main experiment: weighted least-queue vs plain round-robin. The comparison measures both **performance** (throughput and latency) and **cost efficiency** (average cost per dispatched job).
+
+### Cost model
+
+Nodes alternate between cost `1.0` (cheap) and cost `2.0` (expensive). With 10 default nodes this gives 5 cheap + 5 expensive.
+
+| Algorithm | Routing decision | Expected avg cost per job |
+|---|---|---|
+| Weighted least-queue | Fills cheap nodes first; spills to expensive only when saturated | ≈ 1.0 at low load, rising toward 1.5 as load increases |
+| Round-robin | Distributes evenly regardless of cost | Always ≈ 1.5 |
+
+The gap between the two lines in the cost panel is the key result.
+
+### Prerequisites
+
+Make sure the stack is already deployed and running (`docker service ls` shows all services up). Then confirm Python and k6 are installed locally:
+
+```bash
+k6 version
+python --version
+```
+
+### Step 1 — Confirm the selector is in weighted mode (default)
+
+```bash
+docker service logs zk_verifier-selector --tail 3
+# Must show: Routing=weighted
+```
+
+If it shows `roundrobin`, switch it back:
+
+```bash
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 10 --stark-count 10 --routing weighted" \
+  zk_verifier-selector
+```
+
+### Step 2 — Run the weighted sweep
+
+```bash
+python sweep_throughput.py \
+  --vus 10,20,30,50,75,100 \
+  --iterations-per-vu 10 \
+  --cooldown 10 \
+  --stark-ratio 0.0 \
+  --output sweep_weighted.csv
+```
+
+### Step 3 — Switch the selector to round-robin
+
+```bash
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 10 --stark-count 10 --routing roundrobin" \
+  zk_verifier-selector
+```
+
+Wait ~10 seconds, then confirm the switch:
+
+```bash
+docker service logs zk_verifier-selector --tail 3
+# Must show: Routing=roundrobin
+```
+
+### Step 4 — Run the round-robin sweep
+
+```bash
+python sweep_throughput.py \
+  --vus 10,20,30,50,75,100 \
+  --iterations-per-vu 10 \
+  --cooldown 10 \
+  --stark-ratio 0.0 \
+  --output sweep_roundrobin.csv
+```
+
+### Step 5 — Generate the comparison graph
+
+```bash
+python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv
+```
+
+This produces `comparison_graph.png` with four panels:
+
+1. **Throughput** — req/s vs VUs, both algorithms, peak annotated
+2. **Latency** — p95 and p99 ms vs VUs
+3. **Failures** — failed verifications per run
+4. **Avg cost per job** — the key result; shaded region shows cost saved by weighted routing vs round-robin, with reference lines at `1.0` (theoretical best) and `1.5` (round-robin theory)
+
+You can also pass custom labels:
+
+```bash
+python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv \
+  --label-a "Weighted Least-Queue" \
+  --label-b "Round-Robin" \
+  --out my_comparison.png
+```
+
+### Step 6 — Restore weighted mode after the experiment
+
+```bash
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 10 --stark-count 10 --routing weighted" \
+  zk_verifier-selector
+```
+
+---
+
+## 8. Find the Optimal Cost-Weight (Weight Sweep)
+
+The `--snark-cost-weight` parameter controls how strongly the weighted least-queue routing penalises expensive nodes:
+
+```
+score(node i) = queue_depth(i) + cost(i) × snark_cost_weight
+```
+
+| Weight value | Routing behaviour |
+|---|---|
+| `0` | Pure least-queue — ignores node cost entirely |
+| `10` | Default — balances queue depth and cost |
+| Very high | Always routes to cheapest node regardless of queue depth |
+
+`weight_sweep.py` finds the optimal value automatically: it steps through a list of weights, restarts the selector at each value, runs k6 at a fixed VU count, and records throughput plus average cost per job. `visualize_weight_sweep.py` then plots a **composite score** (`throughput / avg_cost`) that peaks at the optimal weight — the point where you get the most throughput per cost unit.
+
+### Local sweep (laptop)
+
+```bash
+python weight_sweep.py \
+  --weights 0,1,2,3,5,7,10,15,20,30,50 \
+  --vus 200 \
+  --iterations 2000 \
+  --snark-count 10 \
+  --stark-count 10
+```
+
+Then plot:
+
+```bash
+python visualize_weight_sweep.py   # produces weight_sweep_graph.png
+```
+
+The graph has two panels:
+
+1. **Top** — throughput (req/s) and p95 latency vs weight; marks peak throughput
+2. **Bottom** — average cost per job and composite score (throughput / cost); marks the optimal weight
+
+### AWS sweep (backend EC2)
+
+On AWS the sweep must run on the **backend EC2** because it needs both Docker (to update the selector) and k6 (to drive load against `localhost`). Install k6 on the backend once:
+
+```bash
+# On backend EC2:
+sudo apt install -y gpg curl
+curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/k6.list
+sudo apt update && sudo apt install -y k6
+```
+
+Copy the scripts from your laptop (run on your laptop):
+
+```bash
+# Git Bash:
+scp -i "zk-authaas-key.pem" \
+  load_test.js \
+  weight_sweep.py \
+  ubuntu@<backend-public-ip>:~/zk-authaas/
+```
+
+Run the sweep (load goes to `localhost` so there is no network hop):
+
+```bash
+# On backend EC2:
+cd zk-authaas
+python3 weight_sweep.py \
+  --target localhost \
+  --vus 200 \
+  --iterations 2000 \
+  --snark-count 50 \
+  --stark-count 50 \
+  --weights 0,1,2,3,5,7,10,15,20,30,50
+```
+
+Copy results back and visualize on your laptop:
+
+```bash
+# Git Bash on your laptop:
+scp -i "zk-authaas-key.pem" \
+  ubuntu@<backend-public-ip>:~/zk-authaas/weight_sweep_results.csv .
+python visualize_weight_sweep.py
+```
+
+---
+
+## 9. Visualize a Single Load-Test Run
 
 After a run that produced CSV output (`--out csv=test_results.csv`):
 
@@ -210,7 +404,7 @@ python visualize_k6.py   # produces k6_performance_graph.png
 
 ---
 
-## 8. Tear Down (local)
+## 10. Tear Down (local)
 
 ```bash
 docker stack rm zk
@@ -219,7 +413,7 @@ docker swarm leave --force   # only if you don't plan to redeploy
 
 ---
 
-## 9. Deploying on AWS
+## 11. Deploying on AWS
 
 ### Account access
 
@@ -387,7 +581,7 @@ A running `c5.4xlarge` on-demand costs roughly **$0.68/hr**. A forgotten instanc
 
 ---
 
-## 10. File Reference
+## 12. File Reference
 
 | File | Role |
 |---|---|
@@ -406,10 +600,13 @@ A running `c5.4xlarge` on-demand costs roughly **$0.68/hr**. A forgotten instanc
 | `visualize_sweep.py` | Plots throughput-vs-VUs knee graph from `sweep_results.csv` |
 | `monitor_queues.ps1` | Real-time queue depth monitor (Windows PowerShell) |
 | `visualize_k6.py` | Plots RPS + latency over time from a k6 CSV |
+| `visualize_comparison.py` | Four-panel comparison graph from two sweep CSVs (weighted vs round-robin) |
+| `weight_sweep.py` | Iterates `--snark-cost-weight` values, updates the live selector, runs k6, saves to `weight_sweep_results.csv` |
+| `visualize_weight_sweep.py` | Dual-axis plot of throughput + cost vs weight, with composite score to identify the optimal weight |
 
 ---
 
-## 11. Troubleshooting
+## 13. Troubleshooting
 
 **Services stuck in `0/N` or restarting.**
 Check the failure reason: `docker service ps zk_snark-verifier --no-trunc`. Most common causes are memory overcommit (reduce replicas or raise the memory limit in `docker-compose.yml`) or a failed image build.
@@ -431,6 +628,21 @@ Either no worker replicas are running (`docker service ls`) or the selector's `-
 
 **k6 EC2 gets `connection refused` on port 8000.**
 Either the backend security group is missing the rule for the k6 EC2's private IP (Section 9 Step 4), or you used the backend's public IP instead of the private IP in the `TARGET` variable.
+
+**Cost panel in `comparison_graph.png` shows `None` or is missing.**
+The stack was deployed before the `/stats/cost` endpoint existed. Rebuild and redeploy the request-handler image: `docker compose build --no-cache` then `docker stack deploy -c docker-compose.yml zk`.
+
+**Cost panel shows the same value for both algorithms (both ≈ 1.5).**
+The selector was not actually switched between runs — check the selector log (`docker service logs zk_verifier-selector --tail 3`) before each sweep to confirm `Routing=weighted` or `Routing=roundrobin`.
+
+**Weight sweep graph shows flat cost (≈ 1.5) at all weights.**
+The stack may not have the `/stats/cost` endpoint or the selector was started without cost-weight args. Rebuild and redeploy: `docker compose build --no-cache && docker stack deploy -c docker-compose.yml zk`. Then confirm the selector log shows `SNARK_COST_WEIGHT=<value>`.
+
+**Weight sweep finishes but throughput barely changes across weights.**
+The VU count is too low to saturate any node, so the routing decision makes no difference. Increase `--vus` until at least some nodes are non-empty (`monitor_queues.ps1` shows queue depth > 0).
+
+**`docker service update` in weight sweep fails with "service not found".**
+The Docker service name defaults to `zk_verifier-selector`. If you deployed under a different stack name, pass `--service <your-stack>_verifier-selector`.
 
 **`docker stack rm` leaves networks behind.**
 Wait ~15 seconds before redeploying. Swarm tears down overlay networks asynchronously.

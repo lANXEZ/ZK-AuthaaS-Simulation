@@ -100,6 +100,8 @@ scp -i "zk-authaas-key.pem" `
   ubuntu@<k6-public-ip>:~/
 ```
 
+> `weight_sweep.py` is not copied here — it must run on the **backend EC2** (see Option D below), because it needs Docker to update the selector.
+
 > If your `.pem` file is not inside the project folder, replace `"zk-authaas-key.pem"` with its full path (e.g. `"C:/Users/YourName/Downloads/zk-authaas-key.pem"`).
 
 `sweep_throughput.py` uses only Python's standard library — no `pip install` needed. Python 3 is already available on Ubuntu 22.04.
@@ -164,7 +166,7 @@ scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results.csv .
 python visualize_k6.py
 ```
 
-**Option B — VU sweep** (produces `sweep_results.csv`):
+**Option B — VU sweep, single algorithm** (produces `sweep_results.csv`):
 
 Run the sweep on the k6 EC2:
 ```bash
@@ -184,6 +186,137 @@ Copy results back to your laptop and visualize:
 cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_results.csv .
 python visualize_sweep.py
+```
+
+**Option C — Algorithm comparison sweep** (weighted least-queue vs round-robin):
+
+This runs the sweep twice — once per routing algorithm — then produces a side-by-side comparison graph.
+
+**Run 1: weighted least-queue (default)**
+
+Confirm the selector is in weighted mode (it should be by default):
+```bash
+# On backend EC2:
+docker service logs zk_verifier-selector --tail 1
+# Must show: Routing=weighted
+```
+
+Run the sweep on the k6 EC2:
+```bash
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 25,50,100,150,200,300,400 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_weighted.csv
+```
+
+**Switch the selector to round-robin on the backend EC2:**
+```bash
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing roundrobin" \
+  zk_verifier-selector
+```
+
+Confirm the switch:
+```bash
+docker service logs zk_verifier-selector --tail 1
+# Must show: Routing=roundrobin
+```
+
+**Run 2: round-robin**
+```bash
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 25,50,100,150,200,300,400 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_roundrobin.csv
+```
+
+**Copy both results back and generate the comparison graph on your laptop:**
+```bash
+# Git Bash on your laptop:
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_weighted.csv .
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_roundrobin.csv .
+python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv
+```
+
+This produces `comparison_graph.png` with three panels: throughput, p95/p99 latency, and failed verifications — both algorithms on the same axes.
+
+**Option D — Cost-weight sweep** (finds optimal `--snark-cost-weight` for this deployment):
+
+The weight sweep updates the live selector between k6 runs, so it must run where Docker is available — on the **backend EC2**. First install k6 on the backend (one-time):
+
+```bash
+# On backend EC2:
+sudo apt install -y gpg curl
+curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/k6.list
+sudo apt update && sudo apt install -y k6
+```
+
+Copy the weight sweep script and load test to the backend EC2 (run on your laptop):
+
+**Git Bash:**
+```bash
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+
+scp -i "zk-authaas-key.pem" \
+  load_test.js \
+  weight_sweep.py \
+  ubuntu@<backend-public-ip>:~/zk-authaas/
+```
+
+**PowerShell:**
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
+
+scp -i "zk-authaas-key.pem" `
+  load_test.js `
+  weight_sweep.py `
+  ubuntu@<backend-public-ip>:~/zk-authaas/
+```
+
+Run the sweep on the backend EC2 (k6 targets `localhost` — no network hop):
+
+```bash
+# On backend EC2:
+cd zk-authaas
+python3 weight_sweep.py \
+  --target localhost \
+  --vus 200 \
+  --iterations 2000 \
+  --snark-count 50 \
+  --stark-count 50 \
+  --weights 0,1,2,3,5,7,10,15,20,30,50
+```
+
+Copy results back to your laptop and visualize:
+
+```bash
+# Git Bash on your laptop:
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" \
+  ubuntu@<backend-public-ip>:~/zk-authaas/weight_sweep_results.csv .
+python visualize_weight_sweep.py
+```
+
+The graph (`weight_sweep_graph.png`) shows two panels:
+- **Top** — throughput and p95 latency vs weight; marks peak throughput
+- **Bottom** — avg cost per job and composite score (throughput / cost); marks the optimal weight
+
+Restore the selector to the best weight found before running any further sweeps:
+
+```bash
+# On backend EC2:
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight <best-weight> --stark-cost-weight 1.0" \
+  zk_verifier-selector
 ```
 
 ### 8. TEAR DOWN — do this every session, no exceptions
@@ -214,7 +347,21 @@ Always run both commands together — scale the workers, then sync the selector.
 ```bash
 docker service scale zk_snark-verifier=50 zk_stark-verifier=50
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight 10.0 --stark-cost-weight 1.0" \
+  zk_verifier-selector
+```
+
+**50 + 50, round-robin (for comparison experiment):**
+```bash
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing roundrobin --snark-cost-weight 10.0 --stark-cost-weight 1.0" \
+  zk_verifier-selector
+```
+
+**50 + 50, custom weight (after running weight sweep):**
+```bash
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight <best-weight> --stark-cost-weight 1.0" \
   zk_verifier-selector
 ```
 
@@ -222,7 +369,7 @@ docker service update \
 ```bash
 docker service scale zk_snark-verifier=500 zk_stark-verifier=500
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 500 --stark-count 500" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 500 --stark-count 500 --routing weighted --snark-cost-weight 10.0 --stark-cost-weight 1.0" \
   zk_verifier-selector
 ```
 
@@ -243,3 +390,6 @@ docker service update \
 | `Error: Invalid proof` in SNARK worker logs | `verification_key.json` mismatch — rebuild the image: `docker compose build --no-cache` |
 | k6 `connection refused` on port 8000 | Security group missing the k6 private IP rule (Step 2), or using public IP instead of private IP. |
 | Swarm services stuck `pending` | CPU/memory overcommit. Check `docker service ps` and reduce replicas or resource limits. |
+| Weight sweep: `docker service update` fails | Stack name mismatch — default service name is `zk_verifier-selector`. Pass `--service <stack>_verifier-selector` if you used a different stack name. |
+| Weight sweep: cost stays flat at ≈ 1.5 across all weights | `/stats/cost` endpoint missing — rebuild and redeploy the request-handler image. |
+| Weight sweep: throughput barely changes across weights | VU count too low to saturate any node. Increase `--vus` until `monitor_queues.ps1` shows queue depth > 0. |

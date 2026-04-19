@@ -108,6 +108,12 @@ services:
       - "10"
       - "--stark-count"
       - "10"
+      - "--routing"
+      - "weighted"
+      - "--snark-cost-weight"
+      - "10.0"
+      - "--stark-cost-weight"
+      - "1.0"
     deploy:
       replicas: 1
     networks:

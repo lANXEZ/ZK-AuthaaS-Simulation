@@ -39,8 +39,6 @@ def plot_sweep(csv_path, output_path, show=False):
     df = df.sort_values('vus').reset_index(drop=True)
 
     # Locate the knee - the VU level with peak throughput.
-    # Use positional (iloc) indexing after reset_index so pandas returns
-    # concrete scalar types the type checker can narrow to int/float.
     knee_pos = int(df['throughput_req_per_sec'].to_numpy().argmax())
     knee_vus = int(df['vus'].iloc[knee_pos])
     knee_throughput = float(df['throughput_req_per_sec'].iloc[knee_pos])
@@ -59,7 +57,7 @@ def plot_sweep(csv_path, output_path, show=False):
     # ----------------------------------------
     color_tp = '#1f77b4'
     ax_top.set_ylabel('Throughput (req/s)', color=color_tp, fontsize=11)
-    ax_top.plot(
+    ax_top.plot(                                                   # [OPTIONAL] comment these 5 lines to remove throughput line
         df['vus'], df['throughput_req_per_sec'],
         marker='o', color=color_tp, linewidth=2.5,
         label='Throughput', zorder=3,
@@ -70,19 +68,18 @@ def plot_sweep(csv_path, output_path, show=False):
     # Secondary axis for latency
     ax_lat = ax_top.twinx()
     ax_lat.set_ylabel('Latency (ms)', color='#d62728', fontsize=11)
-    ax_lat.plot(df['vus'], df['async_p50_ms'],
+    ax_lat.plot(df['vus'], df['async_p50_ms'],                     # [OPTIONAL] comment to remove p50 latency line
                 marker='s', linestyle='--', color='#2ca02c',
                 alpha=0.75, label='p50 latency')
-    ax_lat.plot(df['vus'], df['async_p95_ms'],
+    ax_lat.plot(df['vus'], df['async_p95_ms'],                     # [OPTIONAL] comment to remove p95 latency line
                 marker='^', linestyle='--', color='#ff7f0e',
                 alpha=0.75, label='p95 latency')
-    ax_lat.plot(df['vus'], df['async_p99_ms'],
+    ax_lat.plot(df['vus'], df['async_p99_ms'],                     # [OPTIONAL] comment to remove p99 latency line
                 marker='v', linestyle='--', color='#d62728',
                 alpha=0.75, label='p99 latency')
     ax_lat.tick_params(axis='y', labelcolor='#d62728')
 
-    # Annotate the knee
-    ax_top.annotate(
+    ax_top.annotate(                                               # [OPTIONAL] comment these 10 lines to remove peak/knee annotation
         f'Peak throughput\n{knee_throughput:.1f} req/s @ VUs={knee_vus}\n'
         f'(p95 = {knee_p95:.0f} ms here)',
         xy=(knee_vus, knee_throughput),
@@ -127,9 +124,9 @@ def plot_sweep(csv_path, output_path, show=False):
     x_left = [v - base_width / 2 for v in x]
     x_right = [v + base_width / 2 for v in x]
 
-    ax_bot.bar(x_left, failed, width=bar_width,
+    ax_bot.bar(x_left, failed, width=bar_width,                    # [OPTIONAL] comment to remove verification-failure bars
                color='#d62728', alpha=0.7, label='Verification failures')
-    ax_bot.bar(x_right, submits, width=bar_width,
+    ax_bot.bar(x_right, submits, width=bar_width,                  # [OPTIONAL] comment to remove submit-failure bars
                color='#9467bd', alpha=0.7, label='Submit failures')
     ax_bot.set_xlabel('Virtual Users (VUs)', fontsize=11)
     ax_bot.set_ylabel('Failures (count)', fontsize=11)
@@ -137,7 +134,7 @@ def plot_sweep(csv_path, output_path, show=False):
     ax_bot.legend(loc='upper left', fontsize=9)
 
     # Use log scale on X-axis if the range is wide
-    if x_max / max(x_min, 1) > 20:
+    if x_max / max(x_min, 1) > 20:                                # [OPTIONAL] comment these 3 lines to force linear X-axis always
         ax_top.set_xscale('log')
         ax_bot.set_xscale('log')
 

@@ -45,6 +45,7 @@ import json
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 
@@ -57,6 +58,31 @@ DEFAULT_ITERATIONS_PER_VU = 10  # keeps each run roughly equal wall-clock time
 SWEEP_CSV = "sweep_results.csv"
 TEMP_SUMMARY = "_sweep_summary.json"
 
+
+# ------------------------------------------
+# Cost stats helpers
+# ------------------------------------------
+def fetch_cost_stats(target, port):
+    """Query /stats/cost on the request handler. Returns dict or None on failure."""
+    try:
+        url = f"http://{target}:{port}/stats/cost"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+def cost_delta(before, after):
+    """Return per-run avg cost per job computed from two /stats/cost snapshots."""
+    if before is None or after is None:
+        return {"snark_avg_cost_per_job": None, "stark_avg_cost_per_job": None}
+    snark_jobs = max((after.get("snark_total_jobs", 0) - before.get("snark_total_jobs", 0)), 1)
+    snark_cost =       after.get("snark_total_cost", 0) - before.get("snark_total_cost", 0)
+    stark_jobs = max((after.get("stark_total_jobs", 0) - before.get("stark_total_jobs", 0)), 1)
+    stark_cost =       after.get("stark_total_cost", 0) - before.get("stark_total_cost", 0)
+    return {
+        "snark_avg_cost_per_job": round(snark_cost / snark_jobs, 4),
+        "stark_avg_cost_per_job": round(stark_cost / stark_jobs, 4),
+    }
 
 # ------------------------------------------
 # k6 orchestration
@@ -224,13 +250,18 @@ def main():
 
     for i, vus in enumerate(vu_levels):
         iterations = vus * args.iterations_per_vu
+
+        cost_before = fetch_cost_stats(args.target, args.port)
         summary = run_k6(vus, iterations, args.target, args.port,
                          args.stark_ratio, args.script)
+        cost_after = fetch_cost_stats(args.target, args.port)
+
         if summary is None:
             print(f"[SKIP] No summary produced for VUs={vus}")
             continue
 
         row = extract_metrics(summary, vus, iterations, args.stark_ratio)
+        row.update(cost_delta(cost_before, cost_after))
         append_row(row, args.output)
 
         print()

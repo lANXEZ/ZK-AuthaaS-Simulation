@@ -18,14 +18,10 @@ df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
 print("Calculating Requests Per Second (RPS)...")
 df_reqs = df[df['metric_name'] == 'http_reqs'].copy()
 df_reqs.set_index('datetime', inplace=True)
-
-# FIXED: Changed '1S' to '1s'
 rps = df_reqs['metric_value'].resample('1s').count()
 
 # 4. Filter and Process Latency (Using the True Async Metric)
 print("Calculating Latency metrics...")
-
-# CRITICAL FIX: We must use the custom metric from the k6 script to measure the actual worker time
 df_duration = df[df['metric_name'] == 'async_verification_time'].copy()
 
 # Safety fallback just in case you run an older script without the custom metric
@@ -47,54 +43,49 @@ if latency.shape[1] == 2:
 elif latency.shape[1] == 1:
     latency.columns = ['Avg Latency (ms)']
 
-# This tells Pandas to draw a straight mathematical line across any empty gaps!
+# Draw straight lines across any empty time gaps
 latency = latency.interpolate(method='linear')
 
-
-# ==========================================
-# 4.5 THE RELATIVE TIME CONVERSION
-# ==========================================
+# 4.5 Convert to relative time (seconds from start of test)
 print("Converting timestamps to relative time (seconds)...")
-
-# Find the absolute starting millisecond of the test
 start_time = min(rps.index.min(), latency.index.min())
-
-# Subtract the start time from all timestamps and convert to total seconds
-rps.index = (rps.index - start_time).total_seconds()
+rps.index     = (rps.index     - start_time).total_seconds()
 latency.index = (latency.index - start_time).total_seconds()
 
-
-# 5. Plotting the Graph (Academic/IEEE Style)
+# 5. Plotting
 print("Generating graph...")
-plt.style.use('default') 
-fig, ax1 = plt.subplots(figsize=(10, 6), dpi=300) 
+plt.style.use('default')
+fig, ax1 = plt.subplots(figsize=(10, 6), dpi=300)
 
 color_p95 = 'tab:red'
 color_avg = 'tab:orange'
 
-# Updated the X-axis label to reflect the new time format
 ax1.set_xlabel('Time Elapsed (Seconds)', fontweight='bold')
 ax1.set_ylabel('Response Time (ms)', color='black', fontweight='bold')
 
-line1 = ax1.plot(latency.index, latency['p95 Latency (ms)'], color=color_p95, label='p95 Latency', linewidth=1.5)
-line2 = ax1.plot(latency.index, latency['Avg Latency (ms)'], color=color_avg, label='Avg Latency', linewidth=1, alpha=0.7)
+line1 = ax1.plot(latency.index, latency['p95 Latency (ms)'],      # [OPTIONAL] comment to remove p95 latency line
+                 color=color_p95, label='p95 Latency', linewidth=1.5)
+line2 = ax1.plot(latency.index, latency['Avg Latency (ms)'],      # [OPTIONAL] comment to remove average latency line
+                 color=color_avg, label='Avg Latency', linewidth=1, alpha=0.7)
 ax1.tick_params(axis='y', labelcolor='black')
 ax1.grid(True, linestyle='--', alpha=0.6)
 
-ax2 = ax1.twinx()  
+ax2 = ax1.twinx()
 color_rps = 'tab:blue'
 ax2.set_ylabel('Throughput (Requests / Second)', color=color_rps, fontweight='bold')
-line3 = ax2.plot(rps.index, rps, color=color_rps, label='Throughput (RPS)', linewidth=2)
+line3 = ax2.plot(rps.index, rps,                                   # [OPTIONAL] comment to remove throughput line
+                 color=color_rps, label='Throughput (RPS)', linewidth=2)
 ax2.tick_params(axis='y', labelcolor=color_rps)
 
-ax2.fill_between(rps.index, 0, rps, color=color_rps, alpha=0.1)
+ax2.fill_between(rps.index, 0, rps, color=color_rps, alpha=0.1)   # [OPTIONAL] comment to remove shaded area under throughput
 
 lines = line1 + line2 + line3
+#lines = line3  # [OPTIONAL] change to this if you comment out latency lines
 labels = [str(l.get_label()) for l in lines]
 ax1.legend(lines, labels, loc='upper left', frameon=True, shadow=True)
 
 plt.title('ZK-AuthAAS Verification Performance Under Load', fontweight='bold', pad=15)
-fig.tight_layout() 
+fig.tight_layout()
 
 plt.savefig(OUTPUT_IMAGE, format='png', bbox_inches='tight')
 print(f"Success! Graph saved as {OUTPUT_IMAGE}")
