@@ -78,10 +78,31 @@ echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.i
 sudo apt update && sudo apt install -y k6
 ```
 
-Copy the load test from your laptop (run on laptop):
+Copy the load test and sweep script from your laptop. Run these commands **on your laptop**, not the EC2. Note the quoted paths — the project folder contains spaces.
+
+**Git Bash:**
 ```bash
-scp -i zk-authaas-key.pem load_test.js ubuntu@<k6-public-ip>:~/load_test.js
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+
+scp -i "zk-authaas-key.pem" \
+  load_test.js \
+  sweep_throughput.py \
+  ubuntu@<k6-public-ip>:~/
 ```
+
+**PowerShell:**
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
+
+scp -i "zk-authaas-key.pem" `
+  load_test.js `
+  sweep_throughput.py `
+  ubuntu@<k6-public-ip>:~/
+```
+
+> If your `.pem` file is not inside the project folder, replace `"zk-authaas-key.pem"` with its full path (e.g. `"C:/Users/YourName/Downloads/zk-authaas-key.pem"`).
+
+`sweep_throughput.py` uses only Python's standard library — no `pip install` needed. Python 3 is already available on Ubuntu 22.04.
 
 ### 5. Scale verifiers and sync the selector
 
@@ -133,10 +154,36 @@ k6 run \
 
 ### 7. Collect results
 
+**Option A — single test run** (produces `test_results.csv`):
+
+Copy back to your laptop and visualize:
 ```bash
-# On your laptop:
-scp -i zk-authaas-key.pem ubuntu@<k6-public-ip>:~/test_results.csv ./test_results.csv
+# Git Bash on your laptop:
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results.csv .
 python visualize_k6.py
+```
+
+**Option B — VU sweep** (produces `sweep_results.csv`):
+
+Run the sweep on the k6 EC2:
+```bash
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 25,50,100,150,200,300,400 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0
+```
+
+VU levels are chosen to bracket the expected capacity of 50 SNARK verifiers. The knee (where throughput stops climbing) should appear somewhere between 100 and 300 VUs.
+
+Copy results back to your laptop and visualize:
+```bash
+# Git Bash on your laptop:
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_results.csv .
+python visualize_sweep.py
 ```
 
 ### 8. TEAR DOWN — do this every session, no exceptions

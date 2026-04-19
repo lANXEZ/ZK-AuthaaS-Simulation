@@ -65,6 +65,8 @@ services:
       - proof-queue
     ports:
       - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
     command: ["python", "requestHandler.py", "--redis-host", "proof-queue", "--redis-port", "6379"]
     deploy:
       replicas: 1
@@ -85,6 +87,8 @@ services:
       - proof-queue
       - snark-queue
       - stark-queue
+    environment:
+      - PYTHONUNBUFFERED=1
     command:
       - "python"
       - "verifierSelector.py"
@@ -157,6 +161,7 @@ services:
       - proof-queue
     environment:
       - TASK_SLOT={{.Task.Slot}}
+      - PYTHONUNBUFFERED=1
     command:
       - "python"
       - "STARKVerifierWorker.py"
