@@ -7,3 +7,5 @@ k6_performance_graph.png
 sweep_results.csv
 sweep_throughput_graph.png
 /.claude
+*.csv
+*.png

@@ -33,10 +33,7 @@ REQUIREMENTS:
     - The ZK-AuthaaS stack must be running and reachable at --target:--port
     - Python 3.7+ (uses only stdlib)
 
-NOTE:
-    This script uses k6's --summary-export flag. On k6 v0.50+ that flag was
-    removed; if you're on a very recent k6 and see an error about it, either
-    downgrade k6 or ask Claude to switch the script to use handleSummary().
+
 """
 
 import argparse
@@ -148,7 +145,7 @@ def extract_metrics(summary, vus, iterations, stark_ratio):
     submit_failures = get(metrics.get("submit_failures"), "count", 0)
 
     completed = get(iter_metric, "count", 0)
-    throughput = get(iter_metric, "rate", 0.0)  # iterations per second
+    throughput = get(iter_metric, "rate", 0)  # iterations per second
 
     return {
         "vus": vus,
@@ -285,7 +282,7 @@ def main():
     print("=" * 60)
     print("\nNext steps:")
     print(f"  1. Inspect: column -s, -t {args.output}  (or open in Excel)")
-    print(f"  2. Graph it: python visualize_sweep.py   (ask Claude if you need this script)")
+    print(f"  2. Graph it: python visualize_sweep.py")
     print("  3. Look for the knee: the VU level where throughput_req_per_sec stops climbing.")
 
 

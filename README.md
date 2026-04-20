@@ -115,50 +115,17 @@ docker service scale zk_snark-verifier=50 zk_stark-verifier=50
 
 ---
 
-## 4. Run the Load Test
+## 4. Quick Smoke Test
 
-### Local (laptop → localhost)
+Verify the stack responds before starting any sweep. This is not the experiment — it just confirms the pipeline is alive.
 
 ```bash
 k6 run load_test.js
 ```
 
-Defaults target `localhost:8000` with 50 VUs and 500 iterations — suitable for a local 10+10 deployment.
+Defaults target `localhost:8000` with 50 VUs and 500 iterations. Expected result: k6 exits cleanly with `failed_verifications=0` and `submit_failures=0`.
 
-### AWS (k6 EC2 → backend EC2 private IP)
-
-SSH into the k6 EC2 and run:
-
-```bash
-k6 run \
-  -e TARGET=<backend-private-ip> \
-  -e VUS=200 \
-  -e ITERATIONS=5000 \
-  -e STARK_RATIO=0.0 \
-  load_test.js \
-  --out csv=test_results.csv
-```
-
-Always use the **private IP** of the backend EC2, not the public IP. Private IP traffic stays on the AWS internal network and adds less than 1 ms RTT, keeping network overhead out of the `snark_verification_time` measurements.
-
-### Configuration reference
-
-All parameters are environment variables — no need to edit the file:
-
-```bash
-k6 run -e TARGET=localhost   load_test.js          # local (default)
-k6 run -e STARK_RATIO=0.0    load_test.js          # pure SNARK
-k6 run -e STARK_RATIO=1.0    load_test.js          # pure STARK
-k6 run -e STARK_RATIO=0.5    load_test.js          # 50/50 mix (default)
-```
-
-### Suggested load profiles
-
-| Deployment | Verifiers | VUS | ITERATIONS |
-|---|---|---|---|
-| Local laptop | 10 + 10 | 50 | 500 |
-| AWS `c5.4xlarge` | 50 + 50 | 200 | 5 000 |
-| AWS `c5.24xlarge` (full run) | 500 + 500 | 1 000 | 50 000 |
+> For the full experiment sequence — finding the optimal VU count, optimal cost-weight, running the algorithm comparison, and generating all graphs — follow Sections 6 through 9 in order.
 
 ---
 
@@ -181,28 +148,166 @@ docker exec $(docker ps -qf "name=zk_snark-queue" | Select-Object -First 1) redi
 
 ---
 
-## 6. Find Maximum Throughput (Sweep)
+## 6. Step 1 — Find True Capacity (VU Sweep)
 
-`sweep_throughput.py` runs k6 at a series of VU levels and records per-run metrics to `sweep_results.csv`:
+Run the VU sweep with **weight=0** (pure least-queue, cost ignored). This removes the weight as a variable so the knee you find is the system's true throughput ceiling — independent of any routing decision. The knee VU recorded here is used as the fixed load in Step 2 and as the centre of the VU range in Step 3.
+
+### Set the selector to weight=0
 
 ```bash
-python sweep_throughput.py                          # default local sweep, all SNARK
-python sweep_throughput.py --stark-ratio 0.5        # 50/50 mix
-python sweep_throughput.py --vus 50,100,200,400,800 --clean
-python sweep_throughput.py --target 172.31.45.12    # target a remote EC2
+docker service update \
+  --args "python verifierSelector.py \
+    --proof-host proof-queue --proof-port 6379 \
+    --snark-host snark-queue --snark-port 6379 \
+    --stark-host stark-queue --stark-port 6379 \
+    --snark-count <N> --stark-count <N> \
+    --routing weighted \
+    --snark-cost-weight 0 --stark-cost-weight 0" \
+  zk_verifier-selector
+
+docker service logs zk_verifier-selector --tail 1
+# Must show: SNARK_COST_WEIGHT=0.0
 ```
 
-The "knee" in the resulting curve — the VU level where `throughput_req_per_sec` stops growing — is the optimal operating point.
+Replace `<N>` with your current replica count (default: `10`).
+
+### Run the sweep
+
+**Local (10 + 10 verifiers):**
+```bash
+python sweep_throughput.py \
+  --vus 10,20,30,50,75,100,150 \
+  --iterations-per-vu 10 \
+  --cooldown 10 \
+  --stark-ratio 0.0 \
+  --output sweep_baseline.csv \
+  --clean
+```
+
+**AWS (50 + 50 verifiers, run on k6 EC2):**
+```bash
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 25,50,100,150,200,300,400 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_baseline.csv \
+  --clean
+```
+
+Plot and read the knee:
+```bash
+python visualize_sweep.py --input sweep_baseline.csv --output sweep_baseline_graph.png
+```
+
+**What to record:** the VU level just before `throughput_req_per_sec` flattens — write it down as **`KNEE_VU`**. This value is used as the fixed `--vus` in Step 2 and as the centre of the VU range in Step 3.
+
+---
+
+## 7. Step 2 — Find Optimal Cost-Weight (Weight Sweep)
+
+The `--snark-cost-weight` parameter controls how strongly routing penalises expensive nodes:
+
+```
+score(node i) = queue_depth(i) + cost(i) × snark_cost_weight
+```
+
+| Weight value | Routing behaviour |
+|---|---|
+| `0` | Pure least-queue — ignores node cost entirely (used in Step 1) |
+| `10` | Default — balances queue depth and cost |
+| Very high | Always routes to cheapest node regardless of queue depth |
+
+`weight_sweep.py` steps through weight values, restarts the selector at each one, runs k6 at the fixed `KNEE_VU` load from Step 1, and records throughput plus average cost per job. `visualize_weight_sweep.py` then plots a **composite score** (`throughput / avg_cost`) that peaks at the optimal weight.
+
+### Local sweep (laptop)
 
 ```bash
-python visualize_sweep.py   # produces sweep_throughput_graph.png
+python weight_sweep.py \
+  --weights 0,1,2,3,5,7,10,15,20,30,50 \
+  --vus <KNEE_VU> \
+  --iterations 1000 \
+  --snark-count 10 \
+  --stark-count 10
+```
+
+Then plot:
+```bash
+python visualize_weight_sweep.py   # produces weight_sweep_graph.png
+```
+
+The graph has two panels:
+1. **Top** — throughput (req/s) and p95 latency vs weight; marks peak throughput
+2. **Bottom** — average cost per job and composite score (throughput / cost); marks the optimal weight
+
+### AWS sweep (backend EC2)
+
+The sweep must run on the **backend EC2** because it needs both Docker (to update the selector) and k6 (to drive load against `localhost`). Install k6 on the backend once:
+
+```bash
+# On backend EC2:
+sudo apt install -y gpg curl
+curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/k6.list
+sudo apt update && sudo apt install -y k6
+```
+
+Copy scripts from your laptop:
+```bash
+# Git Bash:
+scp -i "zk-authaas-key.pem" \
+  load_test.js \
+  weight_sweep.py \
+  ubuntu@<backend-public-ip>:~/zk-authaas/
+```
+
+Run the sweep (k6 targets `localhost` — no network hop):
+```bash
+# On backend EC2:
+cd zk-authaas
+python3 weight_sweep.py \
+  --target localhost \
+  --weights 0,1,2,3,5,7,10,15,20,30,50 \
+  --vus <KNEE_VU> \
+  --iterations 2000 \
+  --snark-count 50 \
+  --stark-count 50
+```
+
+Copy results back and visualize:
+```bash
+# Git Bash on your laptop:
+scp -i "zk-authaas-key.pem" \
+  ubuntu@<backend-public-ip>:~/zk-authaas/weight_sweep_results.csv .
+python visualize_weight_sweep.py
+```
+
+**What to record:** the weight where the composite score peaks — write it down as **`BEST_WEIGHT`**. Lock the selector to this value before running Step 3:
+
+```bash
+docker service update \
+  --args "python verifierSelector.py \
+    --proof-host proof-queue --proof-port 6379 \
+    --snark-host snark-queue --snark-port 6379 \
+    --stark-host stark-queue --stark-port 6379 \
+    --snark-count <N> --stark-count <N> \
+    --routing weighted \
+    --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
+  zk_verifier-selector
+
+docker service logs zk_verifier-selector --tail 1
+# Must show: Routing=weighted, SNARK_COST_WEIGHT=<BEST_WEIGHT>
 ```
 
 ---
 
-## 7. Compare Routing Algorithms (local)
+## 8. Step 3 — Compare Routing Algorithms
 
-This is the main experiment: weighted least-queue vs plain round-robin. The comparison measures both **performance** (throughput and latency) and **cost efficiency** (average cost per dispatched job).
+This is the main experiment: weighted least-queue at `BEST_WEIGHT` vs plain round-robin. The comparison measures both **performance** (throughput and latency) and **cost efficiency** (average cost per dispatched job).
+
+> **Before starting:** confirm the selector is locked to weighted + `BEST_WEIGHT` (the lock command at the end of Step 2). All sweep commands use the same VU range as Step 1 so the graphs share the same x-axis scale.
 
 ### Cost model
 
@@ -215,192 +320,173 @@ Nodes alternate between cost `1.0` (cheap) and cost `2.0` (expensive). With 10 d
 
 The gap between the two lines in the cost panel is the key result.
 
-### Prerequisites
-
-Make sure the stack is already deployed and running (`docker service ls` shows all services up). Then confirm Python and k6 are installed locally:
+### Step 1 — Confirm selector is weighted at BEST_WEIGHT
 
 ```bash
-k6 version
-python --version
-```
-
-### Step 1 — Confirm the selector is in weighted mode (default)
-
-```bash
-docker service logs zk_verifier-selector --tail 3
-# Must show: Routing=weighted
-```
-
-If it shows `roundrobin`, switch it back:
-
-```bash
-docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 10 --stark-count 10 --routing weighted" \
-  zk_verifier-selector
+docker service logs zk_verifier-selector --tail 1
+# Must show: Routing=weighted, SNARK_COST_WEIGHT=<BEST_WEIGHT>
 ```
 
 ### Step 2 — Run the weighted sweep
 
+**Local (10 + 10):**
 ```bash
 python sweep_throughput.py \
-  --vus 10,20,30,50,75,100 \
+  --vus 10,20,30,50,75,100,150 \
   --iterations-per-vu 10 \
   --cooldown 10 \
   --stark-ratio 0.0 \
-  --output sweep_weighted.csv
+  --output sweep_weighted.csv \
+  --clean
+```
+
+**AWS (50 + 50, run on k6 EC2):**
+```bash
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 25,50,100,150,200,300,400 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_weighted.csv \
+  --clean
 ```
 
 ### Step 3 — Switch the selector to round-robin
 
 ```bash
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 10 --stark-count 10 --routing roundrobin" \
+  --args "python verifierSelector.py \
+    --proof-host proof-queue --proof-port 6379 \
+    --snark-host snark-queue --snark-port 6379 \
+    --stark-host stark-queue --stark-port 6379 \
+    --snark-count <N> --stark-count <N> \
+    --routing roundrobin \
+    --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
   zk_verifier-selector
 ```
 
-Wait ~10 seconds, then confirm the switch:
-
+Wait ~10 seconds, then confirm:
 ```bash
-docker service logs zk_verifier-selector --tail 3
+docker service logs zk_verifier-selector --tail 1
 # Must show: Routing=roundrobin
 ```
 
 ### Step 4 — Run the round-robin sweep
 
+**Local:**
 ```bash
 python sweep_throughput.py \
-  --vus 10,20,30,50,75,100 \
+  --vus 10,20,30,50,75,100,150 \
   --iterations-per-vu 10 \
   --cooldown 10 \
   --stark-ratio 0.0 \
-  --output sweep_roundrobin.csv
+  --output sweep_roundrobin.csv \
+  --clean
+```
+
+**AWS (k6 EC2):**
+```bash
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 25,50,100,150,200,300,400 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_roundrobin.csv \
+  --clean
 ```
 
 ### Step 5 — Generate the comparison graph
 
 ```bash
-python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv
+python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv \
+  --label-a "Weighted (weight=<BEST_WEIGHT>)" \
+  --label-b "Round-Robin"
 ```
 
-This produces `comparison_graph.png` with four panels:
-
+This produces `comparison_graph.png` with panels:
 1. **Throughput** — req/s vs VUs, both algorithms, peak annotated
 2. **Latency** — p95 and p99 ms vs VUs
-3. **Failures** — failed verifications per run
-4. **Avg cost per job** — the key result; shaded region shows cost saved by weighted routing vs round-robin, with reference lines at `1.0` (theoretical best) and `1.5` (round-robin theory)
-
-You can also pass custom labels:
-
-```bash
-python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv \
-  --label-a "Weighted Least-Queue" \
-  --label-b "Round-Robin" \
-  --out my_comparison.png
-```
+3. **Avg cost per job** — the key result; shaded region shows cost saved by weighted routing vs round-robin, with reference lines at `1.0` (theoretical best) and `1.5` (round-robin theory)
 
 ### Step 6 — Restore weighted mode after the experiment
 
 ```bash
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 10 --stark-count 10 --routing weighted" \
+  --args "python verifierSelector.py \
+    --proof-host proof-queue --proof-port 6379 \
+    --snark-host snark-queue --snark-port 6379 \
+    --stark-host stark-queue --stark-port 6379 \
+    --snark-count <N> --stark-count <N> \
+    --routing weighted \
+    --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
   zk_verifier-selector
 ```
 
 ---
 
-## 8. Find the Optimal Cost-Weight (Weight Sweep)
+## 9. Step 4 — Run the Load Test and Visualize
 
-The `--snark-cost-weight` parameter controls how strongly the weighted least-queue routing penalises expensive nodes:
+Run one final, long k6 test using the `KNEE_VU` and `BEST_WEIGHT` values determined in Steps 1 and 2. This produces a time-series CSV (`test_results.csv`) that captures throughput and latency over the entire run duration as a single continuous graph.
 
-```
-score(node i) = queue_depth(i) + cost(i) × snark_cost_weight
-```
+### Run the test
 
-| Weight value | Routing behaviour |
-|---|---|
-| `0` | Pure least-queue — ignores node cost entirely |
-| `10` | Default — balances queue depth and cost |
-| Very high | Always routes to cheapest node regardless of queue depth |
-
-`weight_sweep.py` finds the optimal value automatically: it steps through a list of weights, restarts the selector at each value, runs k6 at a fixed VU count, and records throughput plus average cost per job. `visualize_weight_sweep.py` then plots a **composite score** (`throughput / avg_cost`) that peaks at the optimal weight — the point where you get the most throughput per cost unit.
-
-### Local sweep (laptop)
-
+**Local (laptop → localhost):**
 ```bash
-python weight_sweep.py \
-  --weights 0,1,2,3,5,7,10,15,20,30,50 \
-  --vus 200 \
-  --iterations 2000 \
-  --snark-count 10 \
-  --stark-count 10
-```
-
-Then plot:
-
-```bash
-python visualize_weight_sweep.py   # produces weight_sweep_graph.png
-```
-
-The graph has two panels:
-
-1. **Top** — throughput (req/s) and p95 latency vs weight; marks peak throughput
-2. **Bottom** — average cost per job and composite score (throughput / cost); marks the optimal weight
-
-### AWS sweep (backend EC2)
-
-On AWS the sweep must run on the **backend EC2** because it needs both Docker (to update the selector) and k6 (to drive load against `localhost`). Install k6 on the backend once:
-
-```bash
-# On backend EC2:
-sudo apt install -y gpg curl
-curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
-  | sudo tee /etc/apt/sources.list.d/k6.list
-sudo apt update && sudo apt install -y k6
-```
-
-Copy the scripts from your laptop (run on your laptop):
-
-```bash
-# Git Bash:
-scp -i "zk-authaas-key.pem" \
+k6 run \
+  -e VUS=<KNEE_VU> \
+  -e ITERATIONS=<KNEE_VU * 20> \
+  -e STARK_RATIO=0.0 \
   load_test.js \
-  weight_sweep.py \
-  ubuntu@<backend-public-ip>:~/zk-authaas/
+  --out csv=test_results.csv
 ```
 
-Run the sweep (load goes to `localhost` so there is no network hop):
-
+**AWS (k6 EC2 → backend private IP):**
 ```bash
-# On backend EC2:
-cd zk-authaas
-python3 weight_sweep.py \
-  --target localhost \
-  --vus 200 \
-  --iterations 2000 \
-  --snark-count 50 \
-  --stark-count 50 \
-  --weights 0,1,2,3,5,7,10,15,20,30,50
+k6 run \
+  -e TARGET=<backend-private-ip> \
+  -e VUS=<KNEE_VU> \
+  -e ITERATIONS=<KNEE_VU * 20> \
+  -e STARK_RATIO=0.0 \
+  load_test.js \
+  --out csv=test_results.csv
 ```
 
-Copy results back and visualize on your laptop:
+Always use the **private IP** of the backend EC2, not the public IP. Private IP traffic stays on the AWS internal network and adds less than 1 ms RTT, keeping it out of the `async_verification_time` measurements.
 
+Copy the CSV back to your laptop (AWS only):
 ```bash
 # Git Bash on your laptop:
-scp -i "zk-authaas-key.pem" \
-  ubuntu@<backend-public-ip>:~/zk-authaas/weight_sweep_results.csv .
-python visualize_weight_sweep.py
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results.csv .
 ```
 
----
-
-## 9. Visualize a Single Load-Test Run
-
-After a run that produced CSV output (`--out csv=test_results.csv`):
+### Visualize
 
 ```bash
 python visualize_k6.py   # produces k6_performance_graph.png
 ```
+
+### Configuration reference
+
+All load test parameters are environment variables — no need to edit the script:
+
+```bash
+k6 run -e TARGET=localhost   load_test.js   # local (default)
+k6 run -e STARK_RATIO=0.0    load_test.js   # pure SNARK
+k6 run -e STARK_RATIO=1.0    load_test.js   # pure STARK
+k6 run -e STARK_RATIO=0.5    load_test.js   # 50/50 mix
+```
+
+### Suggested load profiles
+
+| Deployment | Verifiers | KNEE_VU (typical) | ITERATIONS |
+|---|---|---|---|
+| Local laptop | 10 + 10 | 30 – 75 | `KNEE_VU × 20` |
+| AWS `c5.4xlarge` | 50 + 50 | 100 – 300 | `KNEE_VU × 20` |
+| AWS `c5.24xlarge` | 500 + 500 | 500 – 1 000 | `KNEE_VU × 20` |
+
+The `KNEE_VU × 20` formula gives roughly the same wall-clock run time regardless of VU count, which keeps the time-series graph a consistent length across deployments.
 
 ---
 

@@ -141,64 +141,38 @@ docker service logs zk_verifier-selector --tail 1
 
 ---
 
-### 6. Run the test
+### 6. Quick sanity check (before starting the experiment)
 
-On the k6 EC2 — always use the backend's **private IP**:
+On the k6 EC2 — do a small smoke run to confirm the full path (k6 → backend → verifiers → response) is working before committing to a long sweep:
 ```bash
 k6 run \
   -e TARGET=<backend-private-ip> \
-  -e VUS=200 \
-  -e ITERATIONS=5000 \
+  -e VUS=10 \
+  -e ITERATIONS=50 \
   -e STARK_RATIO=0.0 \
-  load_test.js \
-  --out csv=test_results.csv
+  load_test.js
 ```
 
-### 7. Collect results
+Expected: k6 exits cleanly, `failed_verifications=0`, `submit_failures=0`. If either counter is non-zero, fix the issue before proceeding to Step 7.
 
-**Option A — single test run** (produces `test_results.csv`):
+### 7. Run the experiment sequence
 
-Copy back to your laptop and visualize:
-```bash
-# Git Bash on your laptop:
-cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results.csv .
-python visualize_k6.py
-```
+Run these four steps in order. Each step feeds a value into the next.
 
-**Option B — VU sweep, single algorithm** (produces `sweep_results.csv`):
+---
 
-Run the sweep on the k6 EC2:
-```bash
-python3 sweep_throughput.py \
-  --target <backend-private-ip> \
-  --vus 25,50,100,150,200,300,400 \
-  --iterations-per-vu 10 \
-  --cooldown 15 \
-  --stark-ratio 0.0
-```
+**Step A — Find True Capacity (VU Sweep at weight=0)**  
+*Runs on: k6 EC2*
 
-VU levels are chosen to bracket the expected capacity of 50 SNARK verifiers. The knee (where throughput stops climbing) should appear somewhere between 100 and 300 VUs.
-
-Copy results back to your laptop and visualize:
-```bash
-# Git Bash on your laptop:
-cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_results.csv .
-python visualize_sweep.py
-```
-
-**Option C — Algorithm comparison sweep** (weighted least-queue vs round-robin):
-
-This runs the sweep twice — once per routing algorithm — then produces a side-by-side comparison graph.
-
-**Run 1: weighted least-queue (default)**
-
-Confirm the selector is in weighted mode (it should be by default):
+First, set the selector to weight=0 on the backend EC2 so the knee is independent of routing:
 ```bash
 # On backend EC2:
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight 0 --stark-cost-weight 0" \
+  zk_verifier-selector
+
 docker service logs zk_verifier-selector --tail 1
-# Must show: Routing=weighted
+# Must show: SNARK_COST_WEIGHT=0.0
 ```
 
 Run the sweep on the k6 EC2:
@@ -209,48 +183,26 @@ python3 sweep_throughput.py \
   --iterations-per-vu 10 \
   --cooldown 15 \
   --stark-ratio 0.0 \
-  --output sweep_weighted.csv
+  --output sweep_baseline.csv \
+  --clean
 ```
 
-**Switch the selector to round-robin on the backend EC2:**
-```bash
-docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing roundrobin" \
-  zk_verifier-selector
-```
-
-Confirm the switch:
-```bash
-docker service logs zk_verifier-selector --tail 1
-# Must show: Routing=roundrobin
-```
-
-**Run 2: round-robin**
-```bash
-python3 sweep_throughput.py \
-  --target <backend-private-ip> \
-  --vus 25,50,100,150,200,300,400 \
-  --iterations-per-vu 10 \
-  --cooldown 15 \
-  --stark-ratio 0.0 \
-  --output sweep_roundrobin.csv
-```
-
-**Copy both results back and generate the comparison graph on your laptop:**
+Copy results back and plot:
 ```bash
 # Git Bash on your laptop:
 cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_weighted.csv .
-scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_roundrobin.csv .
-python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_baseline.csv .
+python visualize_sweep.py --input sweep_baseline.csv --output sweep_baseline_graph.png
 ```
 
-This produces `comparison_graph.png` with three panels: throughput, p95/p99 latency, and failed verifications — both algorithms on the same axes.
+📝 **Record `KNEE_VU`** — the VU level just before throughput flattens.
 
-**Option D — Cost-weight sweep** (finds optimal `--snark-cost-weight` for this deployment):
+---
 
-The weight sweep updates the live selector between k6 runs, so it must run where Docker is available — on the **backend EC2**. First install k6 on the backend (one-time):
+**Step B — Find Optimal Cost-Weight (Weight Sweep)**  
+*Runs on: backend EC2 (needs Docker + k6 on same machine)*
 
+Install k6 on the backend EC2 once:
 ```bash
 # On backend EC2:
 sudo apt install -y gpg curl
@@ -260,63 +212,137 @@ echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.i
 sudo apt update && sudo apt install -y k6
 ```
 
-Copy the weight sweep script and load test to the backend EC2 (run on your laptop):
+Copy the sweep script to the backend EC2 (run on your laptop):
 
 **Git Bash:**
 ```bash
 cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-
-scp -i "zk-authaas-key.pem" \
-  load_test.js \
-  weight_sweep.py \
-  ubuntu@<backend-public-ip>:~/zk-authaas/
+scp -i "zk-authaas-key.pem" load_test.js weight_sweep.py ubuntu@<backend-public-ip>:~/zk-authaas/
 ```
 
 **PowerShell:**
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-
-scp -i "zk-authaas-key.pem" `
-  load_test.js `
-  weight_sweep.py `
-  ubuntu@<backend-public-ip>:~/zk-authaas/
+scp -i "zk-authaas-key.pem" load_test.js weight_sweep.py ubuntu@<backend-public-ip>:~/zk-authaas/
 ```
 
-Run the sweep on the backend EC2 (k6 targets `localhost` — no network hop):
-
+Run the sweep on the backend EC2, using `KNEE_VU` from Step A:
 ```bash
 # On backend EC2:
 cd zk-authaas
 python3 weight_sweep.py \
   --target localhost \
-  --vus 200 \
+  --weights 0,1,2,3,5,7,10,15,20,30,50 \
+  --vus <KNEE_VU> \
   --iterations 2000 \
   --snark-count 50 \
-  --stark-count 50 \
-  --weights 0,1,2,3,5,7,10,15,20,30,50
+  --stark-count 50
 ```
 
-Copy results back to your laptop and visualize:
-
+Copy results back and plot:
 ```bash
 # Git Bash on your laptop:
 cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" \
-  ubuntu@<backend-public-ip>:~/zk-authaas/weight_sweep_results.csv .
+scp -i "zk-authaas-key.pem" ubuntu@<backend-public-ip>:~/zk-authaas/weight_sweep_results.csv .
 python visualize_weight_sweep.py
 ```
 
-The graph (`weight_sweep_graph.png`) shows two panels:
-- **Top** — throughput and p95 latency vs weight; marks peak throughput
-- **Bottom** — avg cost per job and composite score (throughput / cost); marks the optimal weight
+📝 **Record `BEST_WEIGHT`** — the weight where the composite score (throughput / cost) peaks.
 
-Restore the selector to the best weight found before running any further sweeps:
-
+Lock the selector to `BEST_WEIGHT` on the backend EC2:
 ```bash
 # On backend EC2:
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight <best-weight> --stark-cost-weight 1.0" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
   zk_verifier-selector
+
+docker service logs zk_verifier-selector --tail 1
+# Must show: Routing=weighted, SNARK_COST_WEIGHT=<BEST_WEIGHT>
+```
+
+---
+
+**Step C — Compare Routing Algorithms**  
+*Runs on: k6 EC2 (selector switches on backend EC2)*
+
+**Run 1: weighted at BEST_WEIGHT** (selector already set from Step B):
+```bash
+# On k6 EC2:
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 25,50,100,150,200,300,400 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_weighted.csv \
+  --clean
+```
+
+Switch to round-robin on the backend EC2:
+```bash
+# On backend EC2:
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing roundrobin --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
+  zk_verifier-selector
+
+docker service logs zk_verifier-selector --tail 1
+# Must show: Routing=roundrobin
+```
+
+**Run 2: round-robin:**
+```bash
+# On k6 EC2:
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 25,50,100,150,200,300,400 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_roundrobin.csv \
+  --clean
+```
+
+Copy both CSVs back and generate the comparison graph:
+```bash
+# Git Bash on your laptop:
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_weighted.csv .
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_roundrobin.csv .
+python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv \
+  --label-a "Weighted (weight=<BEST_WEIGHT>)" --label-b "Round-Robin"
+```
+
+Restore weighted mode on the backend EC2:
+```bash
+# On backend EC2:
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
+  zk_verifier-selector
+```
+
+---
+
+**Step D — Detailed Time-Series Run**  
+*Runs on: k6 EC2*
+
+Run a single long test at `KNEE_VU` to produce the time-series CSV:
+```bash
+# On k6 EC2:
+k6 run \
+  -e TARGET=<backend-private-ip> \
+  -e VUS=<KNEE_VU> \
+  -e ITERATIONS=<KNEE_VU * 20> \
+  -e STARK_RATIO=0.0 \
+  load_test.js \
+  --out csv=test_results.csv
+```
+
+Copy back and visualize:
+```bash
+# Git Bash on your laptop:
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results.csv .
+python visualize_k6.py
 ```
 
 ### 8. TEAR DOWN — do this every session, no exceptions
