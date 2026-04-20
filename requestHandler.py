@@ -88,6 +88,34 @@ async def get_cost_stats():
     }
 
 
+# ==========================================
+# ENDPOINT 4: Set routing weights dynamically
+# ==========================================
+# Writes the new weights into the proof-queue Redis so the selector picks
+# them up on the very next job dispatch — no container restart required.
+# Used by weight_sweep.py to change the weight between k6 runs remotely.
+@app.post("/admin/set-weight")
+async def set_weight(snark: float = 10.0, stark: float = 1.0):
+    rProofQueue.set("selector:snark_cost_weight", snark)
+    rProofQueue.set("selector:stark_cost_weight", stark)
+    return {"snark_cost_weight": snark, "stark_cost_weight": stark, "status": "ok"}
+
+
+# ==========================================
+# ENDPOINT 5: Read current routing weights
+# ==========================================
+# Returns whatever is stored in Redis — reflects the live value the selector
+# is using, including any changes made via POST /admin/set-weight.
+@app.get("/admin/get-weight")
+async def get_weight():
+    snark = rProofQueue.get("selector:snark_cost_weight")
+    stark = rProofQueue.get("selector:stark_cost_weight")
+    return {
+        "snark_cost_weight": float(snark) if snark is not None else None,  # type: ignore[arg-type]
+        "stark_cost_weight": float(stark) if stark is not None else None,  # type: ignore[arg-type]
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("requestHandler:app", host="0.0.0.0", port=8000, reload=False)

@@ -2,9 +2,9 @@
 """
 Cost-Weight Sweep for ZK-AuthaaS Verifier Selector
 ====================================================
-Iterates over a range of --snark-cost-weight values, updates the running
-verifier-selector service for each value, runs a fixed k6 load test, and
-records throughput + average cost per job so you can find the optimal weight.
+Iterates over a range of --snark-cost-weight values, updates the live selector
+via POST /admin/set-weight (no Docker restart needed), runs a fixed k6 load
+test at each weight, and records throughput + average cost per job.
 
 The selector's cost-weighted routing formula is:
     score(i) = queue_depth(i) + cost(i) * SNARK_COST_WEIGHT
@@ -14,28 +14,24 @@ A very high weight → always route to the cheapest node regardless of queue dep
 The sweet spot maximises throughput while keeping avg cost near 1.0 (all-cheap).
 
 USAGE:
-    # Default sweep on local stack (weights 0 → 30):
+    # Default sweep on local stack (weights 0 → 50):
     python weight_sweep.py
 
     # Custom weight list:
     python weight_sweep.py --weights 0,1,2,5,10,20,50,100
 
-    # Against EC2:
-    python weight_sweep.py --target 172.31.45.12
+    # Against EC2 (runs entirely on k6 machine — no Docker access needed):
+    python weight_sweep.py --target <backend-private-ip>
 
     # Fixed VU count (default: 200):
     python weight_sweep.py --vus 400
-
-    # Skip Docker update (if you're managing the selector manually):
-    python weight_sweep.py --no-docker
 
 OUTPUT:
     weight_sweep_results.csv — one row per weight value
 
 REQUIREMENTS:
     - k6 must be on PATH
-    - Docker must be on PATH (unless --no-docker)
-    - ZK-AuthaaS stack must be running (docker stack deploy'd as "zk")
+    - ZK-AuthaaS stack must be running and reachable at --target:--port
     - Python 3.7+
 """
 
@@ -51,14 +47,12 @@ from pathlib import Path
 # ------------------------------------------
 # Defaults
 # ------------------------------------------
-DEFAULT_WEIGHTS      = [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
-DEFAULT_VUS          = 200
-DEFAULT_ITERATIONS   = 2000   # fixed iterations (not per-VU) so each run is comparable
-DEFAULT_COOLDOWN     = 15     # seconds to let queues drain between runs
-DEFAULT_SERVICE      = "zk_verifier-selector"   # docker service name
-DEFAULT_STACK        = "zk"
-WEIGHT_CSV           = "weight_sweep_results.csv"
-TEMP_SUMMARY         = "_weight_sweep_summary.json"
+DEFAULT_WEIGHTS    = [0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 50]
+DEFAULT_VUS        = 200
+DEFAULT_ITERATIONS = 2000   # fixed iterations (not per-VU) so each run is comparable
+DEFAULT_COOLDOWN   = 15     # seconds to let queues drain between runs
+WEIGHT_CSV         = "weight_sweep_results.csv"
+TEMP_SUMMARY       = "_weight_sweep_summary.json"
 
 
 # ------------------------------------------
@@ -81,44 +75,21 @@ def cost_delta(before, after):
     return {"snark_avg_cost_per_job": round(snark_cost / snark_jobs, 4)}
 
 
-def update_selector_weight(service, snark_count, stark_count, weight, routing,
-                           proof_host, snark_host, stark_host):
+def set_weight_via_api(target, port, snark_weight, stark_weight=1.0):
     """
-    Update the running Docker service args so the selector uses the new weight.
-    Uses `docker service update --args` which re-deploys the single selector task.
+    Change the selector's routing weight live via POST /admin/set-weight.
+    No Docker restart — the selector picks up the new value on its next job dispatch.
+    Returns the confirmed weights from the response, or None on failure.
     """
-    new_args = (
-        f"python verifierSelector.py "
-        f"--proof-host {proof_host} --proof-port 6379 "
-        f"--snark-host {snark_host} --snark-port 6379 "
-        f"--stark-host {stark_host} --stark-port 6379 "
-        f"--snark-count {snark_count} --stark-count {stark_count} "
-        f"--routing {routing} "
-        f"--snark-cost-weight {weight} --stark-cost-weight 1.0"
-    )
-    cmd = ["docker", "service", "update", "--args", new_args, service]
-    print(f"  [docker] Updating selector: snark-cost-weight={weight}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  [WARN] docker service update failed:\n{result.stderr.strip()}")
-        return False
-    return True
-
-
-def wait_for_service(service, timeout=60):
-    """Poll until the service has 1/1 running replicas."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        result = subprocess.run(
-            ["docker", "service", "ls", "--filter", f"name={service}", "--format", "{{.Replicas}}"],
-            capture_output=True, text=True,
-        )
-        replicas = result.stdout.strip()
-        if replicas == "1/1":
-            return True
-        time.sleep(2)
-    print(f"  [WARN] Service {service} did not reach 1/1 in {timeout}s; proceeding anyway")
-    return False
+    try:
+        url = f"http://{target}:{port}/admin/set-weight?snark={snark_weight}&stark={stark_weight}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            result = json.loads(resp.read())
+            print(f"  [api] Weight set: snark_cost_weight={result.get('snark_cost_weight')}")
+            return result
+    except Exception as e:
+        print(f"  [WARN] POST /admin/set-weight failed: {e}")
+        return None
 
 
 def run_k6(vus, iterations, target, port, stark_ratio, load_script):
@@ -211,17 +182,6 @@ def main():
                         help=f"Output CSV path (default: {WEIGHT_CSV})")
     parser.add_argument("--script", default="load_test.js",
                         help="k6 load script path (default: load_test.js)")
-    parser.add_argument("--service", default=DEFAULT_SERVICE,
-                        help=f"Docker service name for selector (default: {DEFAULT_SERVICE})")
-    parser.add_argument("--snark-count", type=int, default=10,
-                        help="SNARK verifier replica count (must match running service)")
-    parser.add_argument("--stark-count", type=int, default=10,
-                        help="STARK verifier replica count (must match running service)")
-    parser.add_argument("--proof-host", default="proof-queue")
-    parser.add_argument("--snark-host", default="snark-queue")
-    parser.add_argument("--stark-host", default="stark-queue")
-    parser.add_argument("--no-docker", action="store_true",
-                        help="Skip docker service update (manage selector manually)")
     parser.add_argument("--clean", action="store_true",
                         help="Delete existing output CSV before starting")
     args = parser.parse_args()
@@ -254,7 +214,7 @@ def main():
     print(f"  VUs:          {args.vus}  (fixed)")
     print(f"  Iterations:   {args.iterations}  (fixed per run)")
     print(f"  Cooldown:     {args.cooldown}s")
-    print(f"  Docker upd:   {'disabled (--no-docker)' if args.no_docker else args.service}")
+    print(f"  Weight update: POST /admin/set-weight (live, no restart)")
     print(f"  Output:       {args.output}")
     print()
 
@@ -263,17 +223,7 @@ def main():
         print(f"WEIGHT {weight}  ({i+1}/{len(weights)})")
         print(f"{'=' * 60}")
 
-        if not args.no_docker:
-            ok = update_selector_weight(
-                args.service,
-                args.snark_count, args.stark_count,
-                weight, "weighted",
-                args.proof_host, args.snark_host, args.stark_host,
-            )
-            if ok:
-                print("  Waiting for selector to restart...")
-                wait_for_service(args.service)
-                time.sleep(3)   # brief settle time after restart
+        set_weight_via_api(args.target, args.port, weight)
 
         cost_before = fetch_cost_stats(args.target, args.port)
         summary = run_k6(args.vus, args.iterations, args.target, args.port,

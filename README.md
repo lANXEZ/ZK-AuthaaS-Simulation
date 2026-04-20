@@ -154,22 +154,23 @@ Run the VU sweep with **weight=0** (pure least-queue, cost ignored). This remove
 
 ### Set the selector to weight=0
 
-```bash
-docker service update \
-  --args "python verifierSelector.py \
-    --proof-host proof-queue --proof-port 6379 \
-    --snark-host snark-queue --snark-port 6379 \
-    --stark-host stark-queue --stark-port 6379 \
-    --snark-count <N> --stark-count <N> \
-    --routing weighted \
-    --snark-cost-weight 0 --stark-cost-weight 0" \
-  zk_verifier-selector
+Use the `/admin/set-weight` endpoint — no Docker access needed, works from any machine that can reach port 8000:
 
-docker service logs zk_verifier-selector --tail 1
-# Must show: SNARK_COST_WEIGHT=0.0
+**Local:**
+```bash
+curl -X POST "http://localhost:8000/admin/set-weight?snark=0&stark=0"
 ```
 
-Replace `<N>` with your current replica count (default: `10`).
+**AWS (run from k6 EC2 or your laptop):**
+```bash
+curl -X POST "http://<backend-private-ip>:8000/admin/set-weight?snark=0&stark=0"
+```
+
+Confirm the selector received the change:
+```bash
+curl -s "http://localhost:8000/admin/get-weight"
+# Expected: {"snark_cost_weight": 0.0, "stark_cost_weight": 0.0}
+```
 
 ### Run the sweep
 
@@ -219,7 +220,7 @@ score(node i) = queue_depth(i) + cost(i) × snark_cost_weight
 | `10` | Default — balances queue depth and cost |
 | Very high | Always routes to cheapest node regardless of queue depth |
 
-`weight_sweep.py` steps through weight values, restarts the selector at each one, runs k6 at the fixed `KNEE_VU` load from Step 1, and records throughput plus average cost per job. `visualize_weight_sweep.py` then plots a **composite score** (`throughput / avg_cost`) that peaks at the optimal weight.
+`weight_sweep.py` steps through weight values, calls `POST /admin/set-weight` at each iteration (the selector reads the new value on its very next job dispatch — no container restart), runs k6 at the fixed `KNEE_VU` load from Step 1, and records throughput plus average cost per job. `visualize_weight_sweep.py` then plots a **composite score** (`throughput / avg_cost`) that peaks at the optimal weight.
 
 ### Local sweep (laptop)
 
@@ -227,9 +228,7 @@ score(node i) = queue_depth(i) + cost(i) × snark_cost_weight
 python weight_sweep.py \
   --weights 0,1,2,3,5,7,10,15,20,30,50 \
   --vus <KNEE_VU> \
-  --iterations 1000 \
-  --snark-count 10 \
-  --stark-count 10
+  --iterations 1000
 ```
 
 Then plot:
@@ -241,51 +240,49 @@ The graph has two panels:
 1. **Top** — throughput (req/s) and p95 latency vs weight; marks peak throughput
 2. **Bottom** — average cost per job and composite score (throughput / cost); marks the optimal weight
 
-### AWS sweep (backend EC2)
+### AWS sweep (k6 EC2)
 
-The sweep must run on the **backend EC2** because it needs both Docker (to update the selector) and k6 (to drive load against `localhost`). Install k6 on the backend once:
+The sweep now uses the HTTP API to change weights, so it no longer needs Docker access. It runs on the **k6 EC2** alongside the other sweep scripts — no changes to the backend EC2 are required.
 
+Copy `weight_sweep.py` to the k6 EC2 (run on your laptop):
+
+**Git Bash:**
 ```bash
-# On backend EC2:
-sudo apt install -y gpg curl
-curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
-  | sudo tee /etc/apt/sources.list.d/k6.list
-sudo apt update && sudo apt install -y k6
+scp -i "zk-authaas-key.pem" weight_sweep.py ubuntu@<k6-public-ip>:~/
 ```
 
-Copy scripts from your laptop:
-```bash
-# Git Bash:
-scp -i "zk-authaas-key.pem" \
-  load_test.js \
-  weight_sweep.py \
-  ubuntu@<backend-public-ip>:~/zk-authaas/
+**PowerShell:**
+```powershell
+scp -i "zk-authaas-key.pem" weight_sweep.py ubuntu@<k6-public-ip>:~/
 ```
 
-Run the sweep (k6 targets `localhost` — no network hop):
+Run the sweep on the k6 EC2:
 ```bash
-# On backend EC2:
-cd zk-authaas
 python3 weight_sweep.py \
-  --target localhost \
+  --target <backend-private-ip> \
   --weights 0,1,2,3,5,7,10,15,20,30,50 \
   --vus <KNEE_VU> \
-  --iterations 2000 \
-  --snark-count 50 \
-  --stark-count 50
+  --iterations 2000
 ```
 
 Copy results back and visualize:
 ```bash
 # Git Bash on your laptop:
-scp -i "zk-authaas-key.pem" \
-  ubuntu@<backend-public-ip>:~/zk-authaas/weight_sweep_results.csv .
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/weight_sweep_results.csv .
 python visualize_weight_sweep.py
 ```
 
-**What to record:** the weight where the composite score peaks — write it down as **`BEST_WEIGHT`**. Lock the selector to this value before running Step 3:
+**What to record:** the weight where the composite score peaks — write it down as **`BEST_WEIGHT`**.
 
+**Set `BEST_WEIGHT` for the comparison sweep.** Use `POST /admin/set-weight` for a session-level change (takes effect immediately, resets to CLI default on container restart):
+
+```bash
+curl -X POST "http://<backend-private-ip>:8000/admin/set-weight?snark=<BEST_WEIGHT>&stark=1.0"
+curl -s "http://<backend-private-ip>:8000/admin/get-weight"
+# Expected: {"snark_cost_weight": <BEST_WEIGHT>, "stark_cost_weight": 1.0}
+```
+
+Or use `docker service update` on the backend EC2 to make it **persistent** (survives container restarts):
 ```bash
 docker service update \
   --args "python verifierSelector.py \
@@ -296,9 +293,6 @@ docker service update \
     --routing weighted \
     --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
   zk_verifier-selector
-
-docker service logs zk_verifier-selector --tail 1
-# Must show: Routing=weighted, SNARK_COST_WEIGHT=<BEST_WEIGHT>
 ```
 
 ---

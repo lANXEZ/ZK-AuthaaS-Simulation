@@ -52,6 +52,19 @@ sudo usermod -aG docker ubuntu
 exit
 
 ssh -i zk-authaas-key.pem ubuntu@<backend-public-ip>
+```
+
+> **`docker compose` not found?** The `docker.io` apt package does not include Compose V2. Install it as a CLI plugin before proceeding:
+> ```bash
+> sudo mkdir -p /usr/local/lib/docker/cli-plugins
+> sudo curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 \
+>   -o /usr/local/lib/docker/cli-plugins/docker-compose
+> sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+> docker compose version   # must print: Docker Compose version v2.27.0
+> ```
+> This is a one-time step per EC2 instance. The plugin is installed system-wide so it survives re-login.
+
+```bash
 git clone <your-repo-url> zk-authaas && cd zk-authaas
 docker swarm init
 docker compose build
@@ -87,6 +100,7 @@ cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" \
   load_test.js \
   sweep_throughput.py \
+  weight_sweep.py \
   ubuntu@<k6-public-ip>:~/
 ```
 
@@ -97,10 +111,9 @@ cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" `
   load_test.js `
   sweep_throughput.py `
+  weight_sweep.py `
   ubuntu@<k6-public-ip>:~/
 ```
-
-> `weight_sweep.py` is not copied here — it must run on the **backend EC2** (see Option D below), because it needs Docker to update the selector.
 
 > If your `.pem` file is not inside the project folder, replace `"zk-authaas-key.pem"` with its full path (e.g. `"C:/Users/YourName/Downloads/zk-authaas-key.pem"`).
 
@@ -164,15 +177,12 @@ Run these four steps in order. Each step feeds a value into the next.
 **Step A — Find True Capacity (VU Sweep at weight=0)**  
 *Runs on: k6 EC2*
 
-First, set the selector to weight=0 on the backend EC2 so the knee is independent of routing:
+First, set the selector to weight=0 so the knee is independent of routing. Call the API from the k6 EC2 — no Docker access needed:
 ```bash
-# On backend EC2:
-docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight 0 --stark-cost-weight 0" \
-  zk_verifier-selector
-
-docker service logs zk_verifier-selector --tail 1
-# Must show: SNARK_COST_WEIGHT=0.0
+# On k6 EC2:
+curl -X POST "http://<backend-private-ip>:8000/admin/set-weight?snark=0&stark=0"
+curl -s "http://<backend-private-ip>:8000/admin/get-weight"
+# Expected: {"snark_cost_weight": 0.0, "stark_cost_weight": 0.0}
 ```
 
 Run the sweep on the k6 EC2:
@@ -188,9 +198,17 @@ python3 sweep_throughput.py \
 ```
 
 Copy results back and plot:
+
+**Git Bash:**
 ```bash
-# Git Bash on your laptop:
 cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_baseline.csv .
+python visualize_sweep.py --input sweep_baseline.csv --output sweep_baseline_graph.png
+```
+
+**PowerShell:**
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_baseline.csv .
 python visualize_sweep.py --input sweep_baseline.csv --output sweep_baseline_graph.png
 ```
@@ -200,65 +218,47 @@ python visualize_sweep.py --input sweep_baseline.csv --output sweep_baseline_gra
 ---
 
 **Step B — Find Optimal Cost-Weight (Weight Sweep)**  
-*Runs on: backend EC2 (needs Docker + k6 on same machine)*
+*Runs on: k6 EC2*
 
-Install k6 on the backend EC2 once:
+`weight_sweep.py` is already on the k6 EC2 (copied in Step 4). It updates the selector weight via `POST /admin/set-weight` — no Docker access or backend SSH needed.
+
+Run the sweep using `KNEE_VU` from Step A:
 ```bash
-# On backend EC2:
-sudo apt install -y gpg curl
-curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
-  | sudo tee /etc/apt/sources.list.d/k6.list
-sudo apt update && sudo apt install -y k6
+# On k6 EC2:
+python3 weight_sweep.py \
+  --target <backend-private-ip> \
+  --weights 0,1,2,3,5,7,10,15,20,30,50 \
+  --vus <KNEE_VU> \
+  --iterations 2000
 ```
 
-Copy the sweep script to the backend EC2 (run on your laptop):
+Copy results back and plot:
 
 **Git Bash:**
 ```bash
 cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" load_test.js weight_sweep.py ubuntu@<backend-public-ip>:~/zk-authaas/
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/weight_sweep_results.csv .
+python visualize_weight_sweep.py
 ```
 
 **PowerShell:**
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" load_test.js weight_sweep.py ubuntu@<backend-public-ip>:~/zk-authaas/
-```
-
-Run the sweep on the backend EC2, using `KNEE_VU` from Step A:
-```bash
-# On backend EC2:
-cd zk-authaas
-python3 weight_sweep.py \
-  --target localhost \
-  --weights 0,1,2,3,5,7,10,15,20,30,50 \
-  --vus <KNEE_VU> \
-  --iterations 2000 \
-  --snark-count 50 \
-  --stark-count 50
-```
-
-Copy results back and plot:
-```bash
-# Git Bash on your laptop:
-cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@<backend-public-ip>:~/zk-authaas/weight_sweep_results.csv .
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/weight_sweep_results.csv .
 python visualize_weight_sweep.py
 ```
 
 📝 **Record `BEST_WEIGHT`** — the weight where the composite score (throughput / cost) peaks.
 
-Lock the selector to `BEST_WEIGHT` on the backend EC2:
+Set `BEST_WEIGHT` on the selector from the k6 EC2 (takes effect immediately):
 ```bash
-# On backend EC2:
-docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
-  zk_verifier-selector
-
-docker service logs zk_verifier-selector --tail 1
-# Must show: Routing=weighted, SNARK_COST_WEIGHT=<BEST_WEIGHT>
+# On k6 EC2:
+curl -X POST "http://<backend-private-ip>:8000/admin/set-weight?snark=<BEST_WEIGHT>&stark=1.0"
+curl -s "http://<backend-private-ip>:8000/admin/get-weight"
+# Expected: {"snark_cost_weight": <BEST_WEIGHT>, "stark_cost_weight": 1.0}
 ```
+
+> **Note:** the API change is session-level — it resets to the CLI default if the selector container restarts. To make it permanent, update the CLI arg on the backend EC2: `docker service update --args "... --snark-cost-weight <BEST_WEIGHT> ..." zk_verifier-selector`.
 
 ---
 
@@ -303,12 +303,22 @@ python3 sweep_throughput.py \
 ```
 
 Copy both CSVs back and generate the comparison graph:
+
+**Git Bash:**
 ```bash
-# Git Bash on your laptop:
 cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_weighted.csv .
 scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_roundrobin.csv .
 python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv \
+  --label-a "Weighted (weight=<BEST_WEIGHT>)" --label-b "Round-Robin"
+```
+
+**PowerShell:**
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_weighted.csv .
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_roundrobin.csv .
+python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv `
   --label-a "Weighted (weight=<BEST_WEIGHT>)" --label-b "Round-Robin"
 ```
 
@@ -338,9 +348,17 @@ k6 run \
 ```
 
 Copy back and visualize:
+
+**Git Bash:**
 ```bash
-# Git Bash on your laptop:
 cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results.csv .
+python visualize_k6.py
+```
+
+**PowerShell:**
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results.csv .
 python visualize_k6.py
 ```
@@ -411,6 +429,7 @@ docker service update \
 
 | Symptom | Fix |
 |---|---|
+| `docker: unknown command: docker compose` | Compose V2 not installed. Run the plugin install block in Step 3. |
 | `Cannot connect to Docker daemon` | Forgot to re-login after `usermod -aG docker`. SSH out and back in. |
 | SNARK services stuck at `0/10` | Memory overcommit — check `docker service ps zk_snark-verifier --no-trunc`. Reduce replicas or raise the `memory` limit in `docker-compose.yml`. |
 | `Error: Invalid proof` in SNARK worker logs | `verification_key.json` mismatch — rebuild the image: `docker compose build --no-cache` |

@@ -40,7 +40,7 @@ args = parser.parse_args()
 # ------------------------------------------
 # Redis connections (one per logical broker)
 # ------------------------------------------
-rProofQueue = redis.Redis(host=args.proof_host, port=args.proof_port, db=0)
+rProofQueue = redis.Redis(host=args.proof_host, port=args.proof_port, db=0, decode_responses=True)
 rSnarkQueue = redis.Redis(host=args.snark_host, port=args.snark_port, db=0)
 rStarkQueue = redis.Redis(host=args.stark_host, port=args.stark_port, db=0)
 
@@ -74,6 +74,8 @@ snark_costs = build_cost_vector(snark_costs_base, snark_count)
 stark_costs = build_cost_vector(stark_costs_base, stark_count)
 
 # Adjustable weight for cost influence (set via --snark-cost-weight / --stark-cost-weight)
+# These are the CLI defaults. The live value is stored in Redis and can be changed
+# at runtime via POST /admin/set-weight without restarting this container.
 SNARK_COST_WEIGHT = args.snark_cost_weight
 STARK_COST_WEIGHT = args.stark_cost_weight
 
@@ -122,10 +124,21 @@ def print_snark_pseudo_queue():
 # Uncomment if you want live queue depth logs:
 # threading.Thread(target=print_snark_pseudo_queue, daemon=True).start()
 
+# Seed Redis with the CLI default weights so the selector always has a valid
+# value on the very first job dispatch, and so GET /admin/get-weight works
+# immediately after startup even before any POST /admin/set-weight call.
+rProofQueue.set("selector:snark_cost_weight", SNARK_COST_WEIGHT)
+rProofQueue.set("selector:stark_cost_weight", STARK_COST_WEIGHT)
+
+# Track the last-seen weights so we can log when they change at runtime
+_last_snark_w = SNARK_COST_WEIGHT
+_last_stark_w = STARK_COST_WEIGHT
+
 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Selector started. "
       f"SNARK={snark_count} nodes, STARK={stark_count} nodes. "
       f"Routing={routing}. "
       f"SNARK_COST_WEIGHT={SNARK_COST_WEIGHT}, STARK_COST_WEIGHT={STARK_COST_WEIGHT}. "
+      f"Weights are live-adjustable via POST /admin/set-weight. "
       f"Waiting for proofs...")
 
 # ------------------------------------------
@@ -149,6 +162,22 @@ while True:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Wake up request discarded: {data}")
         continue
 
+    # Read weights live from Redis — POST /admin/set-weight updates these
+    # keys without restarting the container, so changes take effect here.
+    # Falls back to the CLI default if the key has been deleted.
+    _snark_w_raw = rProofQueue.get("selector:snark_cost_weight")
+    _stark_w_raw = rProofQueue.get("selector:stark_cost_weight")
+    snark_w = float(_snark_w_raw) if _snark_w_raw is not None else SNARK_COST_WEIGHT
+    stark_w = float(_stark_w_raw) if _stark_w_raw is not None else STARK_COST_WEIGHT
+
+    # Log whenever the weight changes at runtime (not on every job)
+    if snark_w != _last_snark_w:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SNARK_COST_WEIGHT changed: {_last_snark_w} → {snark_w}")
+        _last_snark_w = snark_w
+    if stark_w != _last_stark_w:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] STARK_COST_WEIGHT changed: {_last_stark_w} → {stark_w}")
+        _last_stark_w = stark_w
+
     # Pick a verifier based on the selected routing algorithm
     scheme = data.get('payload', {}).get('scheme')
 
@@ -159,7 +188,7 @@ while True:
         else:  # weighted
             min_idx = min(
                 range(snark_count),
-                key=lambda i: snark_pseudo_queues[i] + snark_costs[i] * SNARK_COST_WEIGHT
+                key=lambda i: snark_pseudo_queues[i] + snark_costs[i] * snark_w
             )
         rSnarkQueue.lpush(f"snark_queue:{min_idx}", json.dumps(data))
         snark_pseudo_queues[min_idx] += 1
@@ -174,7 +203,7 @@ while True:
         else:  # weighted
             min_idx = min(
                 range(stark_count),
-                key=lambda i: stark_pseudo_queues[i] + stark_costs[i] * STARK_COST_WEIGHT
+                key=lambda i: stark_pseudo_queues[i] + stark_costs[i] * stark_w
             )
         rStarkQueue.lpush(f"stark_queue:{min_idx}", json.dumps(data))
         stark_pseudo_queues[min_idx] += 1
