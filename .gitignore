@@ -1,7 +1,9 @@
 # Ignore k6 performance graph and test results
 k6_performace_graph.png
 test_results.csv
-sweep_results.csv
-sweep_throughput_graph.png
 *.csv
 *.png
+k6_performance_graph.png
+sweep_results.csv
+sweep_throughput_graph.png
+/.claude
