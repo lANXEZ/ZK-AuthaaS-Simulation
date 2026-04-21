@@ -419,11 +419,23 @@ docker service update \
 
 ## Cost reference
 
+**Standard experiment (50 + 50 workers):**
+
 | Instance | Type | On-demand | 2 hr session |
 |---|---|---|---|
 | Backend | c5.4xlarge | ~$0.68/hr | ~$1.36 |
 | k6 | t3.small | ~$0.02/hr | ~$0.04 |
 | **Total** | | | **~$1.40** |
+
+**Large-scale experiment (500 + 500 workers):**
+
+| Instance | Type | On-demand | 2 hr session |
+|---|---|---|---|
+| Backend | c5.24xlarge | ~$4.08/hr | ~$8.16 |
+| k6 | t3.small | ~$0.02/hr | ~$0.04 |
+| **Total** | | | **~$8.20** |
+
+> ⚠️ A forgotten `c5.24xlarge` left running overnight costs ~$98. Left for a week: ~$686. **Terminate immediately after each session.**
 
 ## Common issues
 

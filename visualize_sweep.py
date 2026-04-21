@@ -74,9 +74,9 @@ def plot_sweep(csv_path, output_path, show=False):
     ax_lat.plot(df['vus'], df['async_p95_ms'],                     # [OPTIONAL] comment to remove p95 latency line
                 marker='^', linestyle='--', color='#ff7f0e',
                 alpha=0.75, label='p95 latency')
-    ax_lat.plot(df['vus'], df['async_p99_ms'],                     # [OPTIONAL] comment to remove p99 latency line
-                marker='v', linestyle='--', color='#d62728',
-                alpha=0.75, label='p99 latency')
+    #ax_lat.plot(df['vus'], df['async_p99_ms'],                     # [OPTIONAL] comment to remove p99 latency line
+    #            marker='v', linestyle='--', color='#d62728',
+    #            alpha=0.75, label='p99 latency')
     ax_lat.tick_params(axis='y', labelcolor='#d62728')
 
     ax_top.annotate(                                               # [OPTIONAL] comment these 10 lines to remove peak/knee annotation

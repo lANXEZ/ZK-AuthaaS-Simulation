@@ -142,12 +142,12 @@ def main():
              marker="o", color=COLOR_A, label=f"{label_a}  p95", linewidth=2)
     ax2.plot(df_b["vus"], df_b["async_p95_ms"],                    # [OPTIONAL] comment to remove round-robin p95 line
              marker="s", linestyle="--", color=COLOR_B, label=f"{label_b}  p95", linewidth=2)
-    ax2.plot(df_a["vus"], df_a["async_p99_ms"],                    # [OPTIONAL] comment to remove weighted p99 line
-             marker="o", linestyle=":", color=COLOR_A, label=f"{label_a}  p99",
-             linewidth=1.2, alpha=0.5)
-    ax2.plot(df_b["vus"], df_b["async_p99_ms"],                    # [OPTIONAL] comment to remove round-robin p99 line
-             marker="s", linestyle=":", color=COLOR_B, label=f"{label_b}  p99",
-             linewidth=1.2, alpha=0.5)
+    #ax2.plot(df_a["vus"], df_a["async_p99_ms"],                    # [OPTIONAL] comment to remove weighted p99 line
+    #         marker="o", linestyle=":", color=COLOR_A, label=f"{label_a}  p99",
+    #         linewidth=1.2, alpha=0.5)
+    #ax2.plot(df_b["vus"], df_b["async_p99_ms"],                    # [OPTIONAL] comment to remove round-robin p99 line
+    #         marker="s", linestyle=":", color=COLOR_B, label=f"{label_b}  p99",
+    #         linewidth=1.2, alpha=0.5)
     ax2.set_ylabel("Latency (ms)")
     ax2.legend(loc="upper left", fontsize=8, ncol=2)
     ax2.grid(True, alpha=0.2)
