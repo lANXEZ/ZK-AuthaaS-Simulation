@@ -192,3 +192,6 @@ networks:
   zk-net:
     driver: overlay
     attachable: true
+    ipam:
+      config:
+        - subnet: 10.1.0.0/20   # 4094 usable IPs — supports 500+500 scale (default /24 only gives 254). Avoid 10.0.x.x which overlaps with Swarm's ingress network (10.0.0.0/24).

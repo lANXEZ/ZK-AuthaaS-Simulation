@@ -60,13 +60,14 @@ async function run() {
     console.log(`[${ts()}] SNARK worker idx=${myIndex} listening on '${myQueueKey}'`);
 
     while (true) {
+        let jobId = null;
         try {
             const job = await rSnarkQueue.brpop(myQueueKey, 0);
             if (!job) continue;
 
             const [, rawData] = job;
             const jobData = JSON.parse(rawData);
-            const jobId   = jobData.job_id;
+            jobId         = jobData.job_id;
             const payload = jobData.payload || {};
 
             if (jobId) {
@@ -93,6 +94,10 @@ async function run() {
 
         } catch (e) {
             console.error(`[${ts()}] Error processing job: ${e.message}`);
+            if (jobId) {
+                await rProofQueue.set(`status:${jobId}`, "failed", "EX", 3600).catch(() => {});
+                await rProofQueue.publish("verifier_feedback", JSON.stringify({ type: "snark", index: myIndex })).catch(() => {});
+            }
             await new Promise(r => setTimeout(r, 1000));
         }
     }

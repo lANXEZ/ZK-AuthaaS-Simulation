@@ -28,6 +28,8 @@ This project runs on a **paid-tier AWS account** (professor-provided). Confirm w
 - [ ] Storage: 30 GB gp3
 - [ ] Record **Public IPv4** and **Private IPv4**
 
+> **Running a 500 + 500 experiment?** Launch a `c5.24xlarge` instead of `c5.4xlarge` — everything else (AMI, key pair, security group, storage) stays the same. See the [500 + 500 setup checklist](#500--500-large-scale-experiment) below before proceeding.
+
 **k6 loader (one per session):**
 - [ ] EC2 → Launch Instance
 - [ ] Name: `zk-authaas-k6` · AMI: Ubuntu 22.04 LTS · Type: `t3.small`
@@ -54,18 +56,18 @@ exit
 ssh -i zk-authaas-key.pem ubuntu@<backend-public-ip>
 ```
 
-> **`docker compose` not found?** The `docker.io` apt package does not include Compose V2. Install it as a CLI plugin before proceeding:
-> ```bash
-> sudo mkdir -p /usr/local/lib/docker/cli-plugins
-> sudo curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 \
->   -o /usr/local/lib/docker/cli-plugins/docker-compose
-> sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-> docker compose version   # must print: Docker Compose version v2.27.0
-> ```
-> This is a one-time step per EC2 instance. The plugin is installed system-wide so it survives re-login.
+**`docker compose` not found?** The `docker.io` apt package does not include Compose V2. Install it as a CLI plugin before proceeding:
+```bash
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+sudo curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+docker compose version   # must print: Docker Compose version v2.27.0
+```
+This is a one-time step per EC2 instance. The plugin is installed system-wide so it survives re-login.
 
 ```bash
-git clone <your-repo-url> zk-authaas && cd zk-authaas
+git clone https://github.com/lANXEZ/ZK-AuthaaS-Simulation.git zk-authaas && cd zk-authaas
 docker swarm init
 docker compose build
 docker stack deploy -c docker-compose.yml zk
@@ -125,13 +127,13 @@ The stack deploys with 10+10 verifiers by default. Before running a real experim
 
 **Scale the worker pools:**
 ```bash
-docker service scale zk_snark-verifier=50 zk_stark-verifier=50
+docker service scale zk_snark-verifier=500 zk_stark-verifier=500
 ```
 
 **Update the selector to match** (this restarts only the selector container):
 ```bash
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 500 --stark-count 500" \
   zk_verifier-selector
 ```
 
@@ -197,6 +199,19 @@ python3 sweep_throughput.py \
   --clean
 ```
 
+ **500+500 scale:** use a wider VU range to find the higher knee. 
+ ```bash
+  python3 sweep_throughput.py \
+    --target <backend-private-ip> \
+    --vus 50,100,200,300,400,500,600,800,1000 \
+    --iterations-per-vu 10 \
+    --cooldown 15 \
+    --stark-ratio 0.0 \
+    --output sweep_baseline.csv \
+    --clean
+  ```
+ Expected KNEE_VU: somewhere in the **400–800** range depending on proof complexity.
+
 Copy results back and plot:
 
 **Git Bash:**
@@ -231,6 +246,16 @@ python3 weight_sweep.py \
   --vus <KNEE_VU> \
   --iterations 2000
 ```
+
+**500+500 scale:** `KNEE_VU` will be larger, so increase `--iterations` to keep each run long enough to be statistically meaningful.
+```bash  
+python3 weight_sweep.py \
+  --target <backend-private-ip> \
+  --weights 0,1,2,3,5,7,10,15,20,30,50 \
+  --vus <KNEE_VU> \
+  --iterations 5000 \
+```
+Everything else (weights list, `--vus <KNEE_VU>`) stays the same.
 
 Copy results back and plot:
 
@@ -278,6 +303,20 @@ python3 sweep_throughput.py \
   --clean
 ```
 
+**500+500 scale:** use the same wider VU range as Step A:
+```bash
+  
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 50,100,200,300,400,500,600,800,1000,1200,1500 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_weighted.csv \
+  --clean
+
+```
+
 Switch to round-robin on the backend EC2:
 ```bash
 # On backend EC2:
@@ -295,6 +334,18 @@ docker service logs zk_verifier-selector --tail 1
 python3 sweep_throughput.py \
   --target <backend-private-ip> \
   --vus 25,50,100,150,200,300,400 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_roundrobin.csv \
+  --clean
+```
+
+**500+500 scale:** same wider VU range as Run 1:
+```bash
+  python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 50,100,200,300,400,500,600,800,1000,1200,1500 \
   --iterations-per-vu 10 \
   --cooldown 15 \
   --stark-ratio 0.0 \
@@ -347,6 +398,8 @@ k6 run \
   --out csv=test_results.csv
 ```
 
+> **500+500 scale:** `KNEE_VU` will be in the 400–800 range, so `KNEE_VU * 20` gives 8,000–16,000 iterations — that's sufficient for a stable time series. No formula change needed; just substitute the larger `KNEE_VU` value.
+
 Copy back and visualize:
 
 **Git Bash:**
@@ -378,6 +431,114 @@ AWS Console:
 - [ ] Confirm EC2 dashboard shows **0 running instances**
 
 A forgotten `c5.4xlarge` left running overnight costs ~$16. Left for a week: ~$115.
+
+---
+
+---
+
+## 500 + 500 Large-Scale Experiment
+
+Use this checklist **instead of** Step 1 when running the 500+500 VU sweep. All other steps (2–8) are identical.
+
+### Instance selection
+
+- [ ] EC2 → Launch Instance
+- [ ] Name: `zk-authaas-backend` · AMI: Ubuntu 22.04 LTS · Type: **`c5.24xlarge`** (96 vCPUs / 192 GB RAM)
+- [ ] Key pair: `zk-authaas-key`
+- [ ] Security group `zk-authaas-backend-sg`: SSH (22) from My IP · TCP 8000 from My IP
+- [ ] Storage: **50 GB gp3** (extra headroom for 1000 container images)
+- [ ] Record **Public IPv4** and **Private IPv4**
+
+> ⚠️ `c5.24xlarge` costs ~$4.08/hr. A 2-hour session costs ~$8.20. An overnight accident costs ~$98. **Set a $25 billing alert before launching.**
+
+### Verify available vCPUs
+
+AWS accounts have a default **vCPU limit of 32** for compute-optimised instances. `c5.24xlarge` needs 96.
+
+- [ ] EC2 → Limits → search **"Running On-Demand C instances"** → check the limit
+- [ ] If limit < 96: **Service Quotas → EC2 → Running On-Demand C instances → Request increase to 96**
+  - Approval usually takes a few minutes for educational accounts; up to 24 hrs otherwise.
+
+### Verify overlay network subnet
+
+The default `docker-compose.yml` configures the overlay network with a `/20` subnet (4094 usable IPs). If you are working from an older copy that uses `/24` (254 IPs), scaling will silently stall at ~246 containers with `DynamicIPsAvailable: 0`.
+
+Check which subnet your running network has:
+```bash
+docker network inspect zk_zk-net | python3 -m json.tool | grep -A5 "Subnet"
+# Must show: "Subnet": "10.1.0.0/20"
+# If it shows /24 — tear down the stack, update docker-compose.yml, and redeploy before scaling.
+```
+
+### Raise kernel inotify limits (required before scaling)
+
+Ubuntu's default `max_user_instances=128` is exhausted at ~230 containers. Docker stalls silently — no error, just stops scheduling new tasks. Run this **before** scaling:
+
+```bash
+# On backend EC2 — apply immediately:
+sudo sysctl fs.inotify.max_user_instances=8192
+sudo sysctl fs.inotify.max_user_watches=524288
+
+# Make permanent across reboots:
+echo "fs.inotify.max_user_instances=8192" | sudo tee -a /etc/sysctl.conf
+echo "fs.inotify.max_user_watches=524288" | sudo tee -a /etc/sysctl.conf
+```
+
+### After deploying the stack — scale to 500 + 500
+
+```bash
+# On backend EC2:
+docker service scale zk_snark-verifier=500 zk_stark-verifier=500
+
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 500 --stark-count 500 --routing weighted --snark-cost-weight 10.0 --stark-cost-weight 1.0" \
+  zk_verifier-selector
+
+docker service ls   # wait until all 500/500 replicas are ready (may take 2–4 min)
+docker service logs zk_verifier-selector --tail 1
+# Must print: "Selector started. SNARK=500 nodes, STARK=500 nodes. Waiting for proofs..."
+```
+
+### Set weight=0 before the VU sweep
+
+```bash
+# From k6 EC2:
+curl -X POST "http://<backend-private-ip>:8000/admin/set-weight?snark=0&stark=0"
+curl -s "http://<backend-private-ip>:8000/admin/get-weight"
+# Expected: {"snark_cost_weight": 0.0, "stark_cost_weight": 0.0}
+```
+
+### Run the VU sweep
+
+```bash
+# On k6 EC2:
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 50,100,200,300,400,500,600,800,1000 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_baseline_500.csv \
+  --clean
+```
+
+Copy results back and plot:
+
+**Git Bash:**
+```bash
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_baseline_500.csv .
+python visualize_sweep.py --input sweep_baseline_500.csv --output sweep_baseline_500_graph.png
+```
+
+**PowerShell:**
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_baseline_500.csv .
+python visualize_sweep.py --input sweep_baseline_500.csv --output sweep_baseline_500_graph.png
+```
+
+📝 **Record `KNEE_VU`** and continue from Step B (weight sweep) using `KNEE_VU` and `--target <backend-private-ip>`.
 
 ---
 
@@ -450,3 +611,6 @@ docker service update \
 | Weight sweep: `docker service update` fails | Stack name mismatch — default service name is `zk_verifier-selector`. Pass `--service <stack>_verifier-selector` if you used a different stack name. |
 | Weight sweep: cost stays flat at ≈ 1.5 across all weights | `/stats/cost` endpoint missing — rebuild and redeploy the request-handler image. |
 | Weight sweep: throughput barely changes across weights | VU count too low to saturate any node. Increase `--vus` until `monitor_queues.ps1` shows queue depth > 0. |
+| `docker service scale` stalls at ~230 containers, no errors | Kernel inotify limit exhausted (`max_user_instances=128`). Run `sudo sysctl fs.inotify.max_user_instances=8192 && sudo sysctl fs.inotify.max_user_watches=524288`. Scaling resumes within 30 seconds. |
+| `docker service scale` stalls at ~246 containers, no errors | Overlay network subnet exhausted (`/24` = 254 IPs). Check with `docker network inspect zk_zk-net \| python3 -m json.tool \| grep DynamicIPsAvailable`. Fix: `docker stack rm zk`, set subnet to `10.1.0.0/20` in `docker-compose.yml`, redeploy. |
+| Services stuck at `0/N` replicas, task state "New", NODE field empty, no errors | Custom subnet overlaps with Swarm's ingress network (`10.0.0.0/24`). Fix: use a non-overlapping subnet like `10.1.0.0/20` in `docker-compose.yml`. Verify with `docker network inspect ingress \| grep Subnet` — your overlay subnet must NOT overlap. |
