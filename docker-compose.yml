@@ -124,9 +124,9 @@ services:
       - "--stark-port"
       - "6379"
       - "--snark-count"
-      - "500"
+      - "80"
       - "--stark-count"
-      - "500"
+      - "80"
       - "--routing"
       - "weighted"
       - "--snark-cost-weight"
@@ -168,13 +168,13 @@ services:
       - "--proof-queue-port"
       - "6379"
     deploy:
-      replicas: 10
+      replicas: 80
       placement:
         constraints:
           - node.labels.pool == snark
       resources:
         limits:
-          cpus: '0.15'
+          cpus: '1.0'
           memory: 384M
     networks:
       - zk-net
@@ -205,7 +205,7 @@ services:
       - "--proof-queue-port"
       - "6379"
     deploy:
-      replicas: 10
+      replicas: 80
       placement:
         constraints:
           - node.labels.pool == stark
