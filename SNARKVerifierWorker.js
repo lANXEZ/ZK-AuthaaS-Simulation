@@ -1,3 +1,10 @@
+// Limit ffjavascript worker threads to 1 — it reads os.cpus() to spawn workers.
+// Inside Docker, os.cpus() returns ALL host CPUs (e.g. 96 on c5.24xlarge) even
+// when the container is limited to 1.0 vCPU, causing Atomics deadlocks.
+const os = require("os");
+const _realCpus = os.cpus.bind(os);
+os.cpus = () => [_realCpus()[0]];
+
 const snarkjs = require("snarkjs");
 const Redis = require("ioredis");
 const fs = require("fs");
