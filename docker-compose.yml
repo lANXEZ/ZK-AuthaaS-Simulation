@@ -14,6 +14,13 @@ version: '3.8'
 # Tear down:
 #   docker stack rm zk
 #
+# Multi-node setup (2 EC2s):
+#   On manager:  docker swarm init --advertise-addr <private-ip>
+#   On worker:   docker swarm join --token <token> <manager-ip>:2377
+#   Label nodes: docker node update --label-add pool=snark <worker-node-id>
+#                docker node update --label-add pool=stark <manager-node-id>
+#   Then deploy normally — placement constraints below pin each pool to its node.
+#
 # Notes:
 # - `build:` is used by `docker compose build`. Swarm (`stack deploy`) ignores it
 #   and pulls by `image:` tag, so we keep both.
@@ -32,6 +39,9 @@ services:
       - "6379:6379"
     deploy:
       replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
     networks:
       - zk-net
 
@@ -41,6 +51,9 @@ services:
       - "6380:6379"
     deploy:
       replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
     networks:
       - zk-net
 
@@ -50,6 +63,9 @@ services:
       - "6381:6379"
     deploy:
       replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
     networks:
       - zk-net
 
@@ -70,6 +86,9 @@ services:
     command: ["python", "requestHandler.py", "--redis-host", "proof-queue", "--redis-port", "6379"]
     deploy:
       replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
     networks:
       - zk-net
 
@@ -116,6 +135,9 @@ services:
       - "1.0"
     deploy:
       replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
     networks:
       - zk-net
 
@@ -147,6 +169,9 @@ services:
       - "6379"
     deploy:
       replicas: 10
+      placement:
+        constraints:
+          - node.labels.pool == snark
       resources:
         limits:
           cpus: '0.15'
@@ -181,6 +206,9 @@ services:
       - "6379"
     deploy:
       replicas: 10
+      placement:
+        constraints:
+          - node.labels.pool == stark
       resources:
         limits:
           cpus: '0.15'
