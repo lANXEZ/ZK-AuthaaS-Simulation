@@ -130,7 +130,7 @@ services:
       - "--routing"
       - "weighted"
       - "--snark-cost-weight"
-      - "10.0"
+      - "1.0"
       - "--stark-cost-weight"
       - "1.0"
     deploy:

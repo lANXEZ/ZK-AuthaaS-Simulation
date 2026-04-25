@@ -28,7 +28,7 @@ This project runs on a **paid-tier AWS account** (professor-provided). Confirm w
 - [ ] Storage: 30 GB gp3
 - [ ] Record **Public IPv4** and **Private IPv4**
 
-> **Running a 500 + 500 experiment?** Launch a `c5.24xlarge` instead of `c5.4xlarge` — everything else (AMI, key pair, security group, storage) stays the same. See the [500 + 500 setup checklist](#500--500-large-scale-experiment) below before proceeding.
+> **Running an 80 + 80 experiment with real Groth16?** See the [Multi-Node Architecture (80+80)](#multi-node-architecture-8080-with-real-groth16) section — this requires two EC2 instances. Single-node 500+500 with real snarkjs is not feasible; see the [known limitations](#known-architectural-limitations) section for why.
 
 **k6 loader (one per session):**
 - [ ] EC2 → Launch Instance
@@ -127,13 +127,13 @@ The stack deploys with 10+10 verifiers by default. Before running a real experim
 
 **Scale the worker pools:**
 ```bash
-docker service scale zk_snark-verifier=500 zk_stark-verifier=500
+docker service scale zk_snark-verifier=80 zk_stark-verifier=80
 ```
 
 **Update the selector to match** (this restarts only the selector container):
 ```bash
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 500 --stark-count 500" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 80" \
   zk_verifier-selector
 ```
 
@@ -199,18 +199,31 @@ python3 sweep_throughput.py \
   --clean
 ```
 
- **500+500 scale:** use a wider VU range to find the higher knee. 
- ```bash
-  python3 sweep_throughput.py \
-    --target <backend-private-ip> \
-    --vus 50,100,200,300,400,500,600,800,1000 \
-    --iterations-per-vu 10 \
-    --cooldown 15 \
-    --stark-ratio 0.0 \
-    --output sweep_baseline.csv \
-    --clean
-  ```
- Expected KNEE_VU: somewhere in the **400–800** range depending on proof complexity.
+**80+80 scale (two-node, real Groth16):** based on observed ~204ms avg verification time, KNEE_VU is expected around **60–100**.
+```bash
+python3 sweep_throughput.py \
+  --target 172.31.79.96 \
+  --vus 50,100,150,200,300,400,500,600,800,1000,1200,1500 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_baseline.csv \
+  --clean
+```
+Expected KNEE_VU: **60–100**. Beyond that, all 80 workers are saturated and throughput flattens.
+
+**500+500 scale:** use a wider VU range to find the higher knee.
+```bash
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 50,100,200,300,400,500,600,800,1000 \
+  --iterations-per-vu 10 \
+  --cooldown 15 \
+  --stark-ratio 0.0 \
+  --output sweep_baseline.csv \
+  --clean
+```
+Expected KNEE_VU: somewhere in the **400–800** range depending on proof complexity.
 
 Copy results back and plot:
 
@@ -247,13 +260,22 @@ python3 weight_sweep.py \
   --iterations 2000
 ```
 
-**500+500 scale:** `KNEE_VU` will be larger, so increase `--iterations` to keep each run long enough to be statistically meaningful.
-```bash  
+**80+80 scale:** with ~204ms avg verification time, 8000 iterations at KNEE_VU gives ~10–15s per weight point — enough for stable statistics.
+```bash
 python3 weight_sweep.py \
   --target <backend-private-ip> \
   --weights 0,1,2,3,5,7,10,15,20,30,50 \
   --vus <KNEE_VU> \
-  --iterations 5000 \
+  --iterations 1000
+```
+
+**500+500 scale:** `KNEE_VU` will be larger, so increase `--iterations` to keep each run long enough to be statistically meaningful.
+```bash
+python3 weight_sweep.py \
+  --target <backend-private-ip> \
+  --weights 0,1,2,3,5,7,10,15,20,30,50 \
+  --vus <KNEE_VU> \
+  --iterations 5000
 ```
 Everything else (weights list, `--vus <KNEE_VU>`) stays the same.
 
@@ -303,9 +325,20 @@ python3 sweep_throughput.py \
   --clean
 ```
 
-**500+500 scale:** use the same wider VU range as Step A:
+**80+80 scale:** same range as Step A.
 ```bash
-  
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 50,100,150,200,300,400,500,600,800,1000,1200,1500 \
+  --iterations-per-vu 10 \
+  --cooldown 5 \
+  --stark-ratio 0.0 \
+  --output sweep_weighted.csv \
+  --clean
+```
+
+**500+500 scale:** use the same wider VU range as Step A.
+```bash
 python3 sweep_throughput.py \
   --target <backend-private-ip> \
   --vus 50,100,200,300,400,500,600,800,1000,1200,1500 \
@@ -314,14 +347,13 @@ python3 sweep_throughput.py \
   --stark-ratio 0.0 \
   --output sweep_weighted.csv \
   --clean
-
 ```
 
 Switch to round-robin on the backend EC2:
 ```bash
 # On backend EC2:
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing roundrobin --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 80 --routing roundrobin --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
   zk_verifier-selector
 
 docker service logs zk_verifier-selector --tail 1
@@ -341,9 +373,21 @@ python3 sweep_throughput.py \
   --clean
 ```
 
-**500+500 scale:** same wider VU range as Run 1:
+**80+80 scale:** same range as Run 1.
 ```bash
-  python3 sweep_throughput.py \
+python3 sweep_throughput.py \
+  --target <backend-private-ip> \
+  --vus 50,100,150,200,300,400,500,600,800,1000,1200,1500 \
+  --iterations-per-vu 10 \
+  --cooldown 5 \
+  --stark-ratio 0.0 \
+  --output sweep_roundrobin.csv \
+  --clean
+```
+
+**500+500 scale:** same wider VU range as Run 1.
+```bash
+python3 sweep_throughput.py \
   --target <backend-private-ip> \
   --vus 50,100,200,300,400,500,600,800,1000,1200,1500 \
   --iterations-per-vu 10 \
@@ -375,9 +419,9 @@ python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv `
 
 Restore weighted mode on the backend EC2:
 ```bash
-# On backend EC2:
+# On backend EC2 (80+80):
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 50 --stark-count 50 --routing weighted --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 80 --routing weighted --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
   zk_verifier-selector
 ```
 
@@ -398,7 +442,18 @@ k6 run \
   --out csv=test_results.csv
 ```
 
-> **500+500 scale:** `KNEE_VU` will be in the 400–800 range, so `KNEE_VU * 20` gives 8,000–16,000 iterations — that's sufficient for a stable time series. No formula change needed; just substitute the larger `KNEE_VU` value.
+**80+80 scale:** `KNEE_VU` is expected around 60–100, so `KNEE_VU * 20` gives 1,200–2,000 iterations. Based on observed results (800 iterations completed in 7.8s at 80 VUs), expect the full time-series run to take ~2–3 minutes.
+```bash
+k6 run \
+  -e TARGET=<backend-private-ip> \
+  -e VUS=<KNEE_VU> \
+  -e ITERATIONS=<KNEE_VU * 20> \
+  -e STARK_RATIO=0.0 \
+  load_test.js \
+  --out csv=test_results_80.csv
+```
+
+**500+500 scale:** `KNEE_VU` will be in the 400–800 range, so `KNEE_VU * 20` gives 8,000–16,000 iterations — that's sufficient for a stable time series. No formula change needed; just substitute the larger `KNEE_VU` value.
 
 Copy back and visualize:
 
@@ -570,8 +625,18 @@ docker service update \
   zk_verifier-selector
 ```
 
-**500 + 500 (switch to `c5.24xlarge` first):**
+**80 + 80 (two-node architecture — see multi-node section):**
 ```bash
+# Run on manager after both nodes are labelled and stack is deployed
+docker service scale zk_snark-verifier=80 zk_stark-verifier=80
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 80 --routing weighted --snark-cost-weight 10.0 --stark-cost-weight 1.0" \
+  zk_verifier-selector
+```
+
+**500 + 500 (NOT viable with real Groth16 — see known limitations):**
+```bash
+# Only works with mocked verification. See known limitations section before attempting.
 docker service scale zk_snark-verifier=500 zk_stark-verifier=500
 docker service update \
   --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 500 --stark-count 500 --routing weighted --snark-cost-weight 10.0 --stark-cost-weight 1.0" \
@@ -588,15 +653,174 @@ docker service update \
 | k6 | t3.small | ~$0.02/hr | ~$0.04 |
 | **Total** | | | **~$1.40** |
 
-**Large-scale experiment (500 + 500 workers):**
+**Large-scale experiment (80 + 80 workers, two-node real Groth16):**
 
-| Instance | Type | On-demand | 2 hr session |
-|---|---|---|---|
-| Backend | c5.24xlarge | ~$4.08/hr | ~$8.16 |
-| k6 | t3.small | ~$0.02/hr | ~$0.04 |
-| **Total** | | | **~$8.20** |
+| Instance | Role | Type | On-demand | 2 hr session |
+|---|---|---|---|---|
+| Manager | Redis, selector, STARK pool | c5.24xlarge | ~$4.08/hr | ~$8.16 |
+| Worker | SNARK pool only | c5.24xlarge | ~$4.08/hr | ~$8.16 |
+| k6 | Load generator | t3.small | ~$0.02/hr | ~$0.04 |
+| **Total** | | | | **~$16.36** |
 
-> ⚠️ A forgotten `c5.24xlarge` left running overnight costs ~$98. Left for a week: ~$686. **Terminate immediately after each session.**
+> ⚠️ Two forgotten `c5.24xlarge` instances left overnight costs ~$196. **Terminate both immediately after each session.**
+
+---
+
+## Multi-Node Architecture (80+80 with Real Groth16)
+
+This is the **recommended architecture** for running real `snarkjs.groth16.verify` at scale. It splits the SNARK and STARK pools across two EC2 nodes to stay within Docker overlay network and CPU threading limits.
+
+**Topology:**
+- **Manager node** (`ip-172-31-79-96`): Redis ×3, request-handler, verifier-selector, STARK pool (80 workers)
+- **Worker node** (`ip-172-31-72-246`): SNARK pool only (80 workers × 1.0 vCPU each)
+
+### Step 1 — Launch two EC2 instances
+
+- [ ] Launch **manager** EC2: `c5.24xlarge`, Ubuntu 22.04, `zk-authaas-key`, same security group, 50 GB gp3
+- [ ] Launch **worker** EC2: same specs as manager, same VPC and subnet (same AZ)
+- [ ] In the shared security group, add an inbound rule: **All traffic · Source: `<security-group-id>`** (self-referencing — allows all intra-cluster traffic)
+- [ ] Verify connectivity: `ping -c3 <worker-private-ip>` from manager should show 0% packet loss
+
+### Step 2 — Install Docker on worker and join swarm
+
+On the **worker EC2**:
+```bash
+sudo apt update && sudo apt install -y docker.io git
+sudo systemctl enable --now docker
+sudo usermod -aG docker ubuntu
+newgrp docker
+```
+
+On the **manager EC2**:
+```bash
+docker swarm init --advertise-addr <manager-private-ip>
+docker swarm join-token worker   # copy the printed join command
+```
+
+On the **worker EC2** (paste the join command from above):
+```bash
+docker swarm join --token SWMTKN-1-... <manager-private-ip>:2377
+# Expected: "This node joined a swarm as a worker."
+```
+
+### Step 3 — Label nodes and build images
+
+On the **manager EC2**:
+```bash
+# Label each node for its pool
+docker node update --label-add pool=stark $(docker node ls -q --filter role=manager)
+docker node update --label-add pool=snark $(docker node ls -q --filter role=worker)
+
+# Confirm both nodes are Ready
+docker node ls
+```
+
+On the **worker EC2** — build the SNARK image:
+```bash
+git clone https://github.com/lANXEZ/ZK-AuthaaS-Simulation zk-authaas
+cd zk-authaas
+docker build -f Dockerfile.snark -t zk-authaas/snark-verifier:latest .
+```
+
+On the **manager EC2** — pull latest compose (includes placement constraints) and deploy:
+```bash
+cd ~/zk-authaas
+git pull
+docker stack deploy -c docker-compose.yml zk
+watch -n3 'docker service ls --format "table {{.Name}}\t{{.Replicas}}"'
+# Wait until all services show target replicas
+```
+
+### Step 4 — Scale to 80+80
+
+```bash
+# On manager — scale services (SNARK goes to worker, STARK stays on manager)
+for TARGET in 20 50 80; do
+  echo "=== Scaling to ${TARGET}+${TARGET} ==="
+  docker service scale zk_snark-verifier=$TARGET zk_stark-verifier=$TARGET
+  sleep 20
+  docker service logs zk_verifier-selector --tail 2
+done
+
+# Update selector count
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 80 --routing weighted --snark-cost-weight 10.0 --stark-cost-weight 1.0" \
+  zk_verifier-selector
+
+docker service logs zk_verifier-selector --tail 1
+# Must print: "Selector started. SNARK=80 nodes, STARK=80 nodes. Waiting for proofs..."
+```
+
+### Step 5 — Confirm placement and smoke test
+
+```bash
+# Verify pool separation
+docker service ps zk_snark-verifier --format "table {{.Name}}\t{{.Node}}" | head -3
+# All SNARK tasks must show the worker node
+
+docker service ps zk_stark-verifier --format "table {{.Name}}\t{{.Node}}" | head -3
+# All STARK tasks must show the manager node
+```
+
+Smoke test — one job should complete in 1–5 seconds:
+```bash
+JOB=$(curl -s -X POST http://localhost:8000/verify/submit \
+  -H "Content-Type: application/json" \
+  -d '{"scheme":"snark","proof":{"pi_a":["16893334615242764580836222078829142520432756203770466604081032720388657032757","5095606969395716303621702958471922376961618029789842152295821108717087682311","1"],"pi_b":[["13772398192624595577472662855811728500397412494267729711099372526485968374649","15249941699599606024139723272508104548269790148997217612719623411267570558493"],["19735295879188043871505513529932228526631701925990878770250928234435443795397","11046809327765151786114304454515091703284305019483922364766276175300463695885"],["1","0"]],"pi_c":["18536201733965390491456176988021021022761142364866628667452517360063595662975","15291715715367874403418883228408929985980666544091293542955491873294267230352","1"],"protocol":"groth16","curve":"bn128"},"public_inputs":["1120771572304984668855649788542860110303223894298952018121329196339919157573","20197087425205130352574209034729275460185533126585197591053247747830393653846","111222333","444555666","1764263975784332459809300572476310454427845461305579380554772042455913567929","10988278040513707334400680073433620711051179041727267619401283491695328957763"]}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+
+watch -n1 "curl -s http://localhost:8000/verify/status/$JOB"
+# Expected: {"status":"completed"} within 10 seconds
+```
+
+### Recommended VU ranges for 80+80
+
+| Test | VU sweep | Expected KNEE_VU |
+|---|---|---|
+| Step A (baseline) | `10,20,40,60,80,100,120,160` | 60–100 |
+| Step B (weight sweep) | `--vus <KNEE_VU> --iterations 1000` | — |
+| Step C (routing comparison) | same range as Step A | — |
+| Step D (time series) | `--vus <KNEE_VU> --iterations <KNEE_VU * 20>` | — |
+
+### Tear down (two nodes)
+
+```bash
+# On manager:
+docker stack rm zk
+docker swarm leave --force
+
+# On worker:
+docker swarm leave --force
+```
+
+Then terminate **both** EC2 instances in the AWS Console.
+
+---
+
+## Known Architectural Limitations
+
+### Why 500+500 with real Groth16 is not feasible on a single node
+
+`snarkjs.groth16.verify` uses `ffjavascript` for BN128 elliptic curve operations. Internally, ffjavascript determines its worker thread count using `os.cpus().length`. Inside a Docker container, `os.cpus()` reports **all host CPUs** (e.g. 96 on a c5.24xlarge) regardless of the container's CPU limit — Docker uses CFS quota-based throttling, not CPU masking.
+
+Result: every SNARK verifier container spawns **95 worker threads** and uses `Atomics.wait()` to synchronise them. With only `0.15` vCPU allocated per container (the limit needed to fit 500 workers on 96 vCPUs), the CFS scheduler throttles the container to 15ms of CPU per 100ms period — not enough for 95+ threads to make forward progress. The `Atomics.wait()` call blocks indefinitely, the container shows **0% CPU**, and the job stays at `"processing"` forever. This is a deadlock, not starvation.
+
+**The fix applied in this project** — `SNARKVerifierWorker.js` monkey-patches `os.cpus()` at startup to return a single CPU entry before snarkjs/ffjavascript loads. This causes ffjavascript to spawn only 1 worker thread, making `Atomics` synchronisation viable even at constrained CPU budgets:
+
+```javascript
+// At top of SNARKVerifierWorker.js — must execute before require("snarkjs")
+const os = require("os");
+const _realCpus = os.cpus.bind(os);
+os.cpus = () => [_realCpus()[0]];
+```
+
+**Why 500 workers still doesn't work even with the patch** — with 1 worker thread per container, each verify needs ~200ms on 1.0 vCPU. Running 500 workers at 1.0 vCPU requires 500 vCPUs — more than any single EC2 instance provides. The multi-node architecture (80 workers × 1.0 vCPU = 80 vCPUs on one node) is the practical ceiling for real Groth16 on a single c5.24xlarge.
+
+**Academic justification for 80+80** — in a production SaaS deployment, Groth16 verifiers would be compiled Rust binaries (e.g. `arkworks`, `bellman`) completing in <10ms per proof. The bottleneck demonstrated here is specific to Node.js + WASM. The 80+80 configuration validates the routing, queueing, and cost-weighted scheduling architecture — which is the system under study — at meaningful concurrency with real cryptographic work.
+
+**To scale beyond 80+80 with real Groth16**: add more worker EC2 nodes to the Swarm. Each additional c5.24xlarge node can host another 80 SNARK workers (80 vCPUs at 1.0 each), giving linear horizontal scaling. 6 worker nodes = ~500 SNARK workers. This is the intended production topology for a SaaS ZK verification service.
+
+---
 
 ## Common issues
 
@@ -614,3 +838,6 @@ docker service update \
 | `docker service scale` stalls at ~230 containers, no errors | Kernel inotify limit exhausted (`max_user_instances=128`). Run `sudo sysctl fs.inotify.max_user_instances=8192 && sudo sysctl fs.inotify.max_user_watches=524288`. Scaling resumes within 30 seconds. |
 | `docker service scale` stalls at ~246 containers, no errors | Overlay network subnet exhausted (`/24` = 254 IPs). Check with `docker network inspect zk_zk-net \| python3 -m json.tool \| grep DynamicIPsAvailable`. Fix: `docker stack rm zk`, set subnet to `10.1.0.0/20` in `docker-compose.yml`, redeploy. |
 | Services stuck at `0/N` replicas, task state "New", NODE field empty, no errors | Custom subnet overlaps with Swarm's ingress network (`10.0.0.0/24`). Fix: use a non-overlapping subnet like `10.1.0.0/20` in `docker-compose.yml`. Verify with `docker network inspect ingress \| grep Subnet` — your overlay subnet must NOT overlap. |
+| SNARK jobs stuck at `"processing"`, verifier shows **0% CPU**, never completes | snarkjs/ffjavascript `Atomics.wait()` deadlock caused by CPU limit too low for its worker threads. Fix: ensure `SNARKVerifierWorker.js` has the `os.cpus()` monkey-patch at the top (limits ffjavascript to 1 worker thread) AND set `cpus: '1.0'` in `docker-compose.yml`. See [known limitations](#known-architectural-limitations). |
+| `verifier-selector` flapping with `Error 113: No route to host` after scaling to 500+500 | Docker overlay VXLAN forwarding table overwhelmed by 1000+ containers on a single node — service VIPs stop resolving. Fix: scale back, or use the two-node architecture. |
+| Swarm network `zk_zk-net` won't remove after `docker stack rm`, hangs indefinitely | Phantom task reference in Swarm raft state. Fix: `docker swarm leave --force && docker swarm init`. |

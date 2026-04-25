@@ -115,7 +115,7 @@ def main():
     fig, axes = plt.subplots(n_panels, 1, figsize=(11, 4 * n_panels), sharex=True)
     fig.suptitle(
         "Routing Algorithm Comparison — Weighted Least-Queue vs Round-Robin\n"
-        "50 + 50 Verifiers  |  SNARK Groth16  |  Cost model: 50 % cheap (1.0) / 50 % expensive (2.0)",
+        "80 + 80 Verifiers  |  SNARK Groth16  |  Cost model: 50 % cheap (1.0) / 50 % expensive (2.0)",
         fontsize=11, fontweight="bold", y=0.99,
     )
 
