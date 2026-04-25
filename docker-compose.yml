@@ -85,7 +85,7 @@ services:
       - PYTHONUNBUFFERED=1
     command: ["python", "requestHandler.py", "--redis-host", "proof-queue", "--redis-port", "6379"]
     deploy:
-      replicas: 1
+      replicas: 8
       placement:
         constraints:
           - node.role == manager
