@@ -391,7 +391,7 @@ python visualize_sweep.py --input sweep_baseline.csv --output sweep_baseline_gra
 **PowerShell:**
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_baseline.csv .
+scp -i "zk-authaas-key.pem" ubuntu@44.200.114.76:~/sweep_baseline.csv .
 python visualize_sweep.py --input sweep_baseline.csv --output sweep_baseline_graph.png
 ```
 
@@ -409,11 +409,11 @@ ulimit -n 65536   # raise fd limit if not already set in this shell
 python3 weight_sweep.py \
   --target <manager-private-ip> \
   --weights 0,1,2,3,5,7,10,15,20,30,50 \
-  --vus <KNEE_VU> \
-  --iterations 15000
+  --vus <KNEE_VU / 2> \
+  --iterations 22500
 ```
 
-> **Why 15000 iterations?** Each weight point needs at least 30 seconds of steady-state measurement to produce a stable average cost and throughput. At KNEE_VU with ~500 completions/s, 15000 iterations ≈ 30s per weight point. Using fewer (e.g. 1000) captures only the transient phase and produces a spiky, unreliable graph. The full 11-weight sweep takes ~6–7 minutes.
+> **Why 225000 iterations?** Each weight point needs at least 30 seconds of steady-state measurement to produce a stable average cost and throughput. At KNEE_VU with ~750 completions/s, 22500 iterations ≈ 30s per weight point. Using fewer (e.g. 1000) captures only the transient phase and produces a spiky, unreliable graph. The full 11-weight sweep takes ~6–7 minutes.
 >
 > **Delete the output CSV before re-running** — `weight_sweep.py` appends to `~/weight_sweep_results.csv` rather than overwriting it. Running twice without deleting produces multiple data points per weight on the graph:
 > ```bash
@@ -456,7 +456,7 @@ curl -s "http://<manager-private-ip>:8000/admin/get-weight"
 ulimit -n 65536   # required — prevents k6 from freezing above ~800 VUs
 python3 sweep_throughput.py \
   --target <manager-private-ip> \
-  --vus 50,100,200,400,600,800,1000,1200,1500,2000,3000,4000,5000 \
+  --vus 50,100,200,400,600,800,1000,1200,1500,2000,3000,4000 \
   --iterations-per-vu 10 \
   --cooldown 15 \
   --stark-ratio 0.0 \
@@ -472,8 +472,12 @@ docker service update \
   --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 80 --routing roundrobin --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
   zk_verifier-selector
 
-docker service logs zk_verifier-selector --tail 1
-# Must show: Routing=roundrobin
+TASK=$(docker service ps zk_verifier-selector --filter "desired-state=running" -q)
+docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK | xargs docker logs 2>&1 | head -3
+# Must show: Routing=roundrobin in the startup line
+# Note: `docker service logs --tail 1` shows logs from ALL historical task instances, not just
+# the current one — you may see old connection errors or stale dispatch rates from dead containers.
+# The command above targets only the currently running container, so its output is authoritative.
 
 docker exec $(docker ps -q -f name=zk_proof-queue) redis-cli DEL \
   selector:snark_total_cost selector:snark_total_jobs \
@@ -489,7 +493,7 @@ docker service update --force zk_verifier-selector
 ulimit -n 65536   # required — set again if you opened a new shell
 python3 sweep_throughput.py \
   --target <manager-private-ip> \
-  --vus 50,100,200,400,600,800,1000,1200,1500,2000,3000,4000,5000 \
+  --vus 50,100,200,400,600,800,1000,1200,1500,2000,3000,4000 \
   --iterations-per-vu 10 \
   --cooldown 15 \
   --stark-ratio 0.0 \
@@ -535,13 +539,13 @@ ulimit -n 65536   # required — prevents k6 from freezing at high VU counts
 k6 run \
   -e TARGET=<manager-private-ip> \
   -e VUS=<KNEE_VU> \
-  -e ITERATIONS=<KNEE_VU * 20> \
+  -e ITERATIONS=<KNEE_VU * 200> \
   -e STARK_RATIO=0.0 \
   load_test.js \
   --out csv=test_results.csv
 ```
 
-> With KNEE_VU 60–100, `KNEE_VU * 20` gives 1,200–2,000 iterations. Expected runtime ~2–3 minutes.
+> With KNEE_VU 1000-1200, `KNEE_VU * 200` gives 200000 - 240000 iterations. Expected runtime ~2–3 minutes.
 
 Copy back and visualize:
 
@@ -555,7 +559,7 @@ python visualize_k6.py
 **PowerShell:**
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@3.209.12.24:~/test_results.csv .
+scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results.csv .
 python visualize_k6.py
 ```
 
@@ -698,4 +702,5 @@ python3 sweep_throughput.py \
 | Services stuck at `0/N` replicas, task state "New", NODE field empty | Custom subnet overlaps with Swarm's ingress network (`10.0.0.0/24`). The compose file uses `10.1.0.0/20` to avoid this — verify with `docker network inspect ingress \| grep Subnet`. |
 | SNARK jobs stuck at `"processing"`, verifier shows **0% CPU**, never completes | snarkjs/ffjavascript `Atomics.wait()` deadlock — the `os.cpus()` monkey-patch is missing or the SNARK image was built before it was added. Rebuild the SNARK image on the worker, then `docker service update --force zk_snark-verifier`. See [Known Limitations](#known-architectural-limitations). |
 | `verifier-selector` flapping with `Error 113: No route to host` | Overlay VXLAN FDB overwhelmed — only happens above ~1000 containers on one node. The two-node split prevents this. If you see it at 80+80, check that SNARK pool is actually pinned to the worker (Step 6 + Step 8 placement check). |
+| `docker service logs zk_verifier-selector` shows Redis `ConnectionError` or stale `Dispatch rate: 0.0` from old task IDs after a `service update` | `docker service logs` shows output from **all historical task instances**, not just the current one. Dead containers that failed on startup (e.g. before Redis was ready) appear in the same log stream. Ignore entries from old task IDs. To read only the currently running container: `TASK=$(docker service ps zk_verifier-selector --filter "desired-state=running" -q) && docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK \| xargs docker logs 2>&1 \| head -5` |
 | Swarm network `zk_zk-net` won't remove after `docker stack rm`, hangs indefinitely | Phantom task reference in Swarm raft state. Fix: `docker swarm leave --force && docker swarm init`. |

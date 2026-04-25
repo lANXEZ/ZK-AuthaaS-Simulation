@@ -63,10 +63,10 @@ color_avg = 'tab:orange'
 ax1.set_xlabel('Time Elapsed (Seconds)', fontweight='bold')
 ax1.set_ylabel('Response Time (ms)', color='black', fontweight='bold')
 
-#line1 = ax1.plot(latency.index, latency['p95 Latency (ms)'],      # [OPTIONAL] comment to remove p95 latency line
-#                 color=color_p95, label='p95 Latency', linewidth=1.5)
-#line2 = ax1.plot(latency.index, latency['Avg Latency (ms)'],      # [OPTIONAL] comment to remove average latency line
-#                 color=color_avg, label='Avg Latency', linewidth=1, alpha=0.7)
+line1 = ax1.plot(latency.index, latency['p95 Latency (ms)'],      # [OPTIONAL] comment to remove p95 latency line
+                 color=color_p95, label='p95 Latency', linewidth=1.5)
+line2 = ax1.plot(latency.index, latency['Avg Latency (ms)'],      # [OPTIONAL] comment to remove average latency line
+                 color=color_avg, label='Avg Latency', linewidth=1, alpha=0.7)
 ax1.tick_params(axis='y', labelcolor='black')
 ax1.grid(True, linestyle='--', alpha=0.6)
 
@@ -79,8 +79,8 @@ ax2.tick_params(axis='y', labelcolor=color_rps)
 
 ax2.fill_between(rps.index, 0, rps, color=color_rps, alpha=0.1)   # [OPTIONAL] comment to remove shaded area under throughput
 
-#lines = line1 + line2 + line3
-lines = line3  # [OPTIONAL] change to this if you comment out latency lines
+lines = line1 + line2 + line3
+#lines = line3  # [OPTIONAL] change to this if you comment out latency lines
 labels = [str(l.get_label()) for l in lines]
 ax1.legend(lines, labels, loc='upper left', frameon=True, shadow=True)
 
