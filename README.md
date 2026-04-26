@@ -4,7 +4,7 @@ A distributed zero-knowledge proof verification system that demonstrates **cost-
 
 SNARK verification uses **real Groth16 proof verification** via `snarkjs` running inside each worker container, with the BN128 pairing actually computed on every request. STARK verification uses a calibrated timing placeholder.
 
-The canonical deployment is a **two-node Docker Swarm cluster** with 80 SNARK + 80 STARK verifier workers and 8 request-handler replicas, sustaining ~1,800 req/s of real Groth16 verification throughput on AWS `c5.24xlarge` hardware.
+The canonical deployment is a **two-node Docker Swarm cluster** with 80 SNARK + 80 STARK verifier workers and 8 request-handler replicas, sustaining **~1,800 real Groth16 verifications per second** on AWS `c5.24xlarge` hardware (~23 verifies/s per worker × 80 workers, ~43 ms per BN128 pairing).
 
 ---
 
@@ -111,6 +111,20 @@ Pseudo-queue depth is incremented on dispatch and decremented when a worker publ
 
 The gap between these two cost lines is the system's headline finding: **33% cost reduction at equivalent throughput** under non-overload conditions.
 
+### System capacity (measured)
+
+| Metric | Value |
+|---|---|
+| Per-worker verify rate | ~23 verifies/s (≈ 43 ms per BN128 pairing on 1.0 vCPU) |
+| Cheap-pool capacity | 40 workers × ~23/s ≈ **~920 verifies/s** |
+| Total system capacity | 80 workers × ~23/s ≈ **~1,840 verifies/s** |
+| Saturation knee | ~1,200 VUs (≈ 1,500 verifies/s — past cheap saturation) |
+
+The cheap-pool saturation point (~920 verifies/s) is what determines where the cost lines diverge or converge:
+
+- **Below ~920/s:** weighted routing fits everything into cheap workers → cost ≈ 1.0; round-robin still uses both pools equally → cost ≈ 1.5. **Lines diverge — 33% cost gap.**
+- **Above ~920/s:** weighted is forced to spill into expensive workers → cost climbs from 1.0 toward 1.5. **Lines converge as the system overloads.**
+
 ---
 
 ## 2. Prerequisites
@@ -200,7 +214,7 @@ The canonical experiment is a four-step flow that produces all the graphs in the
 | Step | Purpose | Output |
 |---|---|---|
 | **A** — VU sweep at weight=0 | Find the system's true throughput ceiling, independent of routing | `KNEE_VU` ≈ 1200 on 80+80 |
-| **B** — Weight sweep at moderate VU (400) | Find the cost-weight that maximises composite score (throughput / cost) | `BEST_WEIGHT` |
+| **B** — Weight sweep at moderate VU (600) | Find the cost-weight that maximises composite score (throughput / cost) | `BEST_WEIGHT` |
 | **C** — Routing comparison sweep at full VU range | Compare weighted vs round-robin across the full load curve | `comparison_graph.png` |
 | **D** — Time-series run at `KNEE_VU` | Long single-load run for the time-series graph | `k6_performance_graph.png` |
 
@@ -232,7 +246,7 @@ Read the **knee** off the throughput curve — the VU level where it stops growi
 
 ### Step B — Weight sweep at moderate VU
 
-> ⚠️ **Run this at 400 VUs, not at `KNEE_VU`.** At `KNEE_VU` the system is past cheap-worker saturation, which forces every weight to land at cost=1.5. The weight only has a meaningful effect *below* cheap saturation.
+> ⚠️ **Run this at 600 VUs, not at `KNEE_VU`.** At `KNEE_VU` the system is past cheap-worker saturation, which forces every weight to land at cost=1.5. The weight only has a meaningful effect *below* cheap saturation.
 
 ```bash
 # On manager: clear Redis state for clean measurement
@@ -251,7 +265,7 @@ ulimit -n 65536
 python3 weight_sweep.py \
   --target <manager-private-ip> \
   --weights 0,1,2,3,5,7,10,15,20,30,50 \
-  --vus 400 \
+  --vus 600 \
   --iterations 15000
 
 python visualize_weight_sweep.py
@@ -329,7 +343,7 @@ ulimit -n 65536
 k6 run \
   -e TARGET=<manager-private-ip> \
   -e VUS=<KNEE_VU> \
-  -e ITERATIONS=$((<KNEE_VU> * 20)) \
+  -e ITERATIONS=$((<KNEE_VU> * 200)) \
   -e STARK_RATIO=0.0 \
   load_test.js \
   --out csv=test_results.csv
@@ -372,7 +386,7 @@ The selector was rewritten in `verifierSelector.py` to remove a single-threaded 
 | Theoretical ceiling | ~330 dispatches/s | ~650+ dispatches/s |
 | Live dispatch logging | None | Logs `Dispatch rate: X.X jobs/s` every 5 s |
 
-Combined with scaling the request-handler to 8 replicas, the system now sustains ~1,800 req/s of real Groth16 verification (≈ 250 actual verifies/s after subtracting status polls).
+Combined with scaling the request-handler to 8 replicas, the system sustains **~1,800 real Groth16 verifications per second** at peak (5000 VUs). Note: `sweep_throughput.py` reports `iterations.rate` from k6 — i.e. completed verifications per second, where one iteration = one full submit-and-poll cycle that succeeds. The "throughput_req_per_sec" column header in the CSV is a misnomer; the underlying number is verifications/second, not HTTP requests/second.
 
 ---
 
@@ -457,7 +471,7 @@ Image not built on that node. Run `docker build -f Dockerfile.snark -t zk-authaa
 Node labels missing. On the manager: `docker node update --label-add pool=stark $(docker node ls -q --filter role=manager)` and `docker node update --label-add pool=snark $(docker node ls -q --filter role=worker)`.
 
 **Cost line stays flat at 1.5 across all weights in the weight sweep.**
-The sweep is running above cheap-worker saturation. Re-run at a lower VU (typically 400, not `KNEE_VU`).
+The sweep is running above cheap-worker saturation. Re-run at a lower VU (typically 600, not `KNEE_VU`).
 
 **Cost line stays flat at 1.0 across all weights.**
 The opposite — load is far below cheap capacity, so even tiny weights route everything to cheap. Either push more VUs or reduce the cheap pool size to make saturation reachable.
