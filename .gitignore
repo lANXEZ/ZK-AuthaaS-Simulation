@@ -1,3 +1,6 @@
+# RSA private key — never commit
+zk-authaas-key.pem
+
 # Ignore k6 performance graph and test results
 k6_performace_graph.png
 test_results.csv

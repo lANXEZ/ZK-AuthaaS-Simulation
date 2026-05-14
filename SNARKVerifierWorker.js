@@ -20,18 +20,22 @@ const path = require("path");
 function parseArgs() {
     const args = process.argv.slice(2);
     const opts = {
-        redisHost: 'snark-queue',
-        redisPort: 6379,
-        proofQueueHost: 'proof-queue',
-        proofQueuePort: 6379,
-        index: null,
+        redisHost:       'snark-queue',
+        redisPort:       6379,
+        proofQueueHost:  'proof-queue',
+        proofQueuePort:  6379,
+        tokenQueueHost:  'token-queue',
+        tokenQueuePort:  6379,
+        index:           null,
     };
     for (let i = 0; i < args.length; i++) {
-        if      (args[i] === '--redis-host')        opts.redisHost = args[++i];
-        else if (args[i] === '--redis-port')        opts.redisPort = parseInt(args[++i]);
-        else if (args[i] === '--proof-queue-host')  opts.proofQueueHost = args[++i];
-        else if (args[i] === '--proof-queue-port')  opts.proofQueuePort = parseInt(args[++i]);
-        else if (args[i] === '--index')             opts.index = parseInt(args[++i]);
+        if      (args[i] === '--redis-host')        opts.redisHost       = args[++i];
+        else if (args[i] === '--redis-port')        opts.redisPort       = parseInt(args[++i]);
+        else if (args[i] === '--proof-queue-host')  opts.proofQueueHost  = args[++i];
+        else if (args[i] === '--proof-queue-port')  opts.proofQueuePort  = parseInt(args[++i]);
+        else if (args[i] === '--token-queue-host')  opts.tokenQueueHost  = args[++i];
+        else if (args[i] === '--token-queue-port')  opts.tokenQueuePort  = parseInt(args[++i]);
+        else if (args[i] === '--index')             opts.index           = parseInt(args[++i]);
     }
     return opts;
 }
@@ -56,8 +60,9 @@ const myQueueKey = `snark_queue:${myIndex}`;
 // Load verification key once at startup — never reloaded per-job
 const vKey = JSON.parse(fs.readFileSync(path.join(__dirname, "verification_key.json"), "utf8"));
 
-const rSnarkQueue = new Redis({ host: opts.redisHost,      port: opts.redisPort });
-const rProofQueue = new Redis({ host: opts.proofQueueHost, port: opts.proofQueuePort });
+const rSnarkQueue  = new Redis({ host: opts.redisHost,      port: opts.redisPort });
+const rProofQueue  = new Redis({ host: opts.proofQueueHost, port: opts.proofQueuePort });
+const rTokenQueue  = new Redis({ host: opts.tokenQueueHost, port: opts.tokenQueuePort });
 
 function ts() {
     return new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -84,15 +89,30 @@ async function run() {
             const proof         = payload.proof;
             const publicSignals = payload.public_inputs;
 
-            const success     = await snarkjs.groth16.verify(vKey, publicSignals, proof);
-            const finalStatus = success ? "completed" : "failed";
+            const success = await snarkjs.groth16.verify(vKey, publicSignals, proof);
 
-            if (jobId) {
-                await rProofQueue.set(`status:${jobId}`, finalStatus, "EX", 3600);
+            if (success) {
+                // Verification passed — enqueue to token-queue for the token-creation module.
+                // Status is intentionally left as "processing"; the token module sets "completed"
+                // once a token has been issued, at which point k6's poll will resolve.
+                const verifiedEntry = JSON.stringify({
+                    job_id:        jobId,
+                    scheme:        "snark",
+                    public_inputs: publicSignals,
+                    verified_at:   Date.now() / 1000,   // Unix timestamp (seconds, float)
+                });
+                await rTokenQueue.lpush("verified_queue", verifiedEntry);
+                console.log(`[${ts()}] SNARK idx=${myIndex} verified OK. Job ${jobId} -> enqueued to verified_queue`);
+            } else {
+                // Verification failed — immediately mark so k6 can stop polling.
+                if (jobId) {
+                    await rProofQueue.set(`status:${jobId}`, "failed", "EX", 3600);
+                }
+                console.log(`[${ts()}] SNARK idx=${myIndex} verification FAILED. Job ${jobId} -> failed`);
             }
 
-            console.log(`[${ts()}] SNARK idx=${myIndex} processed. Job ${jobId} -> ${finalStatus}`);
-
+            // Always publish feedback so the selector decrements this worker's pseudo-queue depth.
+            // The worker is free to accept the next job regardless of whether the proof passed.
             try {
                 await rProofQueue.publish("verifier_feedback", JSON.stringify({ type: "snark", index: myIndex }));
             } catch (e) {

@@ -8,16 +8,15 @@ This project runs on a **paid-tier AWS account** (professor-provided). Confirm w
 
 ## Topology you will end up with
 
-This checklist sets up the **two-node Swarm + dedicated k6 loader** topology — three EC2 instances total. This is the canonical configuration for running real `snarkjs.groth16.verify` at 80+80 scale and is what every step below assumes.
+This checklist sets up the **two-node Swarm + dedicated k6 loader** topology — three EC2 instances total. This is the canonical configuration for running real `snarkjs.groth16.verify` at **80 SNARK scale** (STARK verifiers are not deployed) and is what every step below assumes.
 
 ```
                       ┌──────────────────────┐
    your laptop ──┐    │  Manager EC2         │
-                 │    │  (c5.24xlarge)       │
+                 │    │  (c5.2xlarge)        │
                  │    │  • Redis × 3         │
                  │    │  • request-handler×8 │
-                 │    │  • verifier-selector │
-                 ├───►│  • STARK pool × 80   │
+                 ├───►│  • verifier-selector │
                  │    └─────────┬────────────┘
                  │              │ Swarm overlay (VXLAN)
                  │              ▼
@@ -38,11 +37,11 @@ This checklist sets up the **two-node Swarm + dedicated k6 loader** topology —
 
 | Role | Instance type | Purpose |
 |---|---|---|
-| Manager | `c5.24xlarge` (96 vCPU / 192 GB) | Redis ×3, request-handler **×8**, verifier-selector, STARK pool (80 workers × 0.15 vCPU) |
-| Worker | `c5.24xlarge` (96 vCPU / 192 GB) | SNARK pool only (80 workers × 1.0 vCPU) |
+| Manager | `c5.2xlarge` (8 vCPU / 16 GiB) | Redis ×3, request-handler **×8**, verifier-selector (management services only — no verifier pool) |
+| Worker | `c5.24xlarge` (96 vCPU / 192 GiB) | SNARK pool only (80 workers × 1.0 vCPU) |
 | k6 | `c5.2xlarge` (8 vCPU / 16 GiB) | Load generator — runs k6 + Python sweep scripts |
 
-> **Why two backend nodes?** A single c5.24xlarge cannot host 80 SNARK workers at 1.0 vCPU plus the rest of the stack — it runs out of vCPU. Splitting SNARK onto its own node also avoids overlay-network VIP exhaustion that occurs with 1000+ containers on one node. See [Known Architectural Limitations](#known-architectural-limitations) for the deeper reasoning.
+> **Why two backend nodes?** The SNARK pool requires 80 workers × 1.0 vCPU = 80 vCPUs, which the management node (`c5.2xlarge`, 8 vCPUs) cannot provide. Management services (Redis, FastAPI handler, selector) are all I/O-bound and run comfortably on the small instance, while the CPU-heavy SNARK workload gets its own dedicated `c5.24xlarge`. See [Known Architectural Limitations](#known-architectural-limitations) for the deeper reasoning.
 
 ---
 
@@ -53,7 +52,7 @@ This checklist sets up the **two-node Swarm + dedicated k6 loader** topology —
 - [ ] Set a **billing alert at $25** in AWS Billing → Budgets (two `c5.24xlarge` instances cost ~$8/hr — easy to overrun)
 - [ ] Pick one region and record it — use it for every resource (`us-east-1` recommended)
 - [ ] **EC2 → Key Pairs → Create** — name it `zk-authaas-key`, download the `.pem`, run `chmod 400 zk-authaas-key.pem`
-- [ ] Check the vCPU quota for your account — you need at least 192 vCPUs of "Running On-Demand C instances" (two `c5.24xlarge` × 96 vCPUs each). Default is 32. Request an increase via **Service Quotas → EC2 → Running On-Demand C instances → Request quota increase to 256** if needed. Educational accounts are usually approved within minutes.
+- [ ] Check the vCPU quota for your account — you need at least 112 vCPUs of "Running On-Demand C instances" (one `c5.24xlarge` = 96 vCPUs, two `c5.2xlarge` = 8 vCPUs each). Default is 32. Request an increase via **Service Quotas → EC2 → Running On-Demand C instances → Request quota increase to 128** if needed. Educational accounts are usually approved within minutes.
 
 ---
 
@@ -107,10 +106,10 @@ All three go into the **same VPC, same subnet (same Availability Zone), same sec
 
 **Manager EC2:**
 - [ ] EC2 → Launch Instance
-- [ ] Name: `zk-authaas-manager` · AMI: Ubuntu 22.04 LTS · Type: **`c5.24xlarge`**
+- [ ] Name: `zk-authaas-manager` · AMI: Ubuntu 22.04 LTS · Type: **`c5.2xlarge`** (8 vCPU / 16 GiB)
 - [ ] Key pair: `zk-authaas-key`
 - [ ] Security group: **`zk-authaas-cluster-sg`** (created in Step 1)
-- [ ] Storage: 50 GB gp3
+- [ ] Storage: 30 GiB gp3
 - [ ] Record **Public IPv4** (for SSH) and **Private IPv4** (for inter-node and k6 use)
 
 **Worker EC2:**
@@ -147,9 +146,9 @@ ping -c3 <k6-private-ip>
 
 If either ping fails, re-check that all three EC2s are in `zk-authaas-cluster-sg` and that rule 3 (self-referencing All traffic) was saved correctly.
 
-### Step 3 — Raise kernel inotify limits on both backend nodes
+### Step 3 — Raise kernel inotify limits on the worker node
 
-Ubuntu's default `max_user_instances=128` is exhausted at ~230 containers. With 80+ tasks per node this is borderline; safer to raise it preemptively. Run on **both manager and worker**:
+Ubuntu's default `max_user_instances=128` is exhausted at ~230 containers. The worker runs 80 SNARK tasks, so raise it preemptively. Run on the **worker** (and optionally the manager for safety):
 
 ```bash
 sudo sysctl fs.inotify.max_user_instances=8192
@@ -211,38 +210,37 @@ docker node ls
 # Both nodes should show Status=Ready, the manager has MANAGER STATUS=Leader
 ```
 
-### Step 6 — Label the nodes for pool placement
+### Step 6 — Label the worker node for SNARK placement
 
-The compose file uses `node.labels.pool == snark` and `node.labels.pool == stark` to pin each verifier pool to its dedicated node. Apply the labels on the **manager**:
+The compose file uses `node.labels.pool == snark` to pin the SNARK verifier pool to the worker node. We only deploy SNARK, so only the worker needs a label. Apply on the **manager**:
 
 ```bash
-docker node update --label-add pool=stark $(docker node ls -q --filter role=manager)
 docker node update --label-add pool=snark $(docker node ls -q --filter role=worker)
 
-# Confirm the labels stuck:
-docker node inspect $(docker node ls -q) --format '{{.Description.Hostname}} → pool={{index .Spec.Labels "pool"}}'
+# Confirm the label stuck:
+docker node inspect $(docker node ls -q --filter role=worker) --format '{{.Description.Hostname}} → pool={{index .Spec.Labels "pool"}}'
 # Expected:
-#   ip-172-31-XX-XX → pool=stark
 #   ip-172-31-YY-YY → pool=snark
 ```
 
+> The manager node does **not** need a `pool=stark` label — the STARK verifier service will be scaled to 0 in Step 8 and will never schedule.
+
 ### Step 7 — Build images on both nodes
 
-Swarm does **not** ship images between nodes — each node must already have the images it will run. The manager runs the request-handler, selector, and STARK pool images; the worker runs only the SNARK pool image.
+Swarm does **not** ship images between nodes — each node must already have the images it will run. The manager runs request-handler and selector; the worker runs only the SNARK verifier.
 
-On the **manager**:
+On the **manager** (builds only the management service images):
 ```bash
 cd ~/zk-authaas
-docker compose build
-# Builds all images: request-handler, verifier-selector, snark-verifier, stark-verifier
+docker compose build request-handler verifier-selector
+# Builds: zk-authaas/request-handler:latest, zk-authaas/verifier-selector:latest
+# (snark and stark images are NOT needed on the manager in SNARK-only mode)
 ```
 
-On the **worker**:
+On the **worker** (builds only the SNARK verifier image — this takes ~3–5 min first time due to snarkjs npm install):
 ```bash
 cd ~/zk-authaas
 docker build -f Dockerfile.snark -t zk-authaas/snark-verifier:latest .
-# The worker only needs the SNARK image, but building all is fine too:
-# docker compose build
 ```
 
 ### Step 8 — Deploy the stack
@@ -254,19 +252,36 @@ docker stack deploy -c docker-compose.yml zk
 
 # Watch services come up:
 watch -n3 'docker service ls --format "table {{.Name}}\t{{.Mode}}\t{{.Replicas}}"'
-# All services must reach target replicas. The default in docker-compose.yml is 80+80.
+# docker-compose.yml defaults to 80+80 — we will scale STARK to 0 immediately below.
 ```
 
-**Verify pool placement** (catches mis-labelled nodes):
+**Immediately scale STARK verifiers to 0** (SNARK-only deployment):
 ```bash
-docker service ps zk_snark-verifier --format "table {{.Name}}\t{{.Node}}" | head -3
-# All SNARK tasks must be on the WORKER node
-
-docker service ps zk_stark-verifier --format "table {{.Name}}\t{{.Node}}" | head -3
-# All STARK tasks must be on the MANAGER node
+docker service scale zk_stark-verifier=0
+docker service ls
+# Expected: zk_stark-verifier   replicated   0/0
+#           zk_snark-verifier   replicated   80/80
 ```
 
-If a service is stuck at `0/80`, check `docker service ps zk_<service> --no-trunc` for the error in the last column.
+**Update the selector to match SNARK-only** (default compose args still say --stark-count 80):
+```bash
+docker service update \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 0 --routing weighted --snark-cost-weight 1.0 --stark-cost-weight 1.0" \
+  zk_verifier-selector
+
+# Confirm selector started with STARK=0:
+TASK=$(docker service ps zk_verifier-selector --filter "desired-state=running" -q)
+docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK | xargs docker logs 2>&1 | head -5
+# Must show: "Selector started ... SNARK=80 nodes, STARK=0 nodes ..."
+```
+
+**Verify SNARK pool placement** (catches mis-labelled nodes):
+```bash
+docker service ps zk_snark-verifier --format "table {{.Name}}\t{{.Node}}" | head -5
+# All SNARK tasks must be on the WORKER node
+```
+
+If `zk_snark-verifier` is stuck at `0/80`, check `docker service ps zk_snark-verifier --no-trunc` for the error in the last column.
 
 **Scale the request-handler to 8 replicas** — a single FastAPI process caps at ~100 real verifies/s due to the single-threaded event loop. 8 replicas raises the upstream throughput ceiling to ~800 verifies/s, which is high enough to saturate the cheap worker pool and show the cost-vs-throughput tradeoff at high VUs. Swarm's ingress mesh load-balances port 8000 across all replicas automatically — no changes to k6 or the client needed:
 ```bash
@@ -366,7 +381,7 @@ curl -s "http://<manager-private-ip>:8000/admin/get-weight"
 # Expected: {"snark_cost_weight": 0.0, "stark_cost_weight": 0.0}
 ```
 
-Run the sweep (range tuned for 80+80 with real Groth16 — KNEE_VU is expected around **60–100**):
+Run the sweep (range tuned for 80 SNARK with real Groth16 — KNEE_VU is expected around **1000–1200**):
 ```bash
 ulimit -n 65536   # required — prevents k6 from freezing above ~800 VUs
 python3 sweep_throughput.py \
@@ -469,7 +484,7 @@ python3 sweep_throughput.py \
 Switch the selector to round-robin on the **manager**, then clear Redis state:
 ```bash
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 80 --routing roundrobin --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 0 --routing roundrobin --snark-cost-weight <BEST_WEIGHT> --stark-cost-weight 1.0" \
   zk_verifier-selector
 
 TASK=$(docker service ps zk_verifier-selector --filter "desired-state=running" -q)
@@ -524,7 +539,7 @@ python visualize_comparison.py sweep_weighted.csv sweep_roundrobin.csv `
 Restore weighted mode on the **manager**:
 ```bash
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 80 --routing weighted --snark-cost-weight 20 --stark-cost-weight 1.0" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count 80 --stark-count 0 --routing weighted --snark-cost-weight 20 --stark-cost-weight 1.0" \
   zk_verifier-selector
 ```
 
@@ -592,28 +607,29 @@ AWS Console:
 
 | Instance | Role | Type | On-demand | 2 hr session |
 |---|---|---|---|---|
-| Manager | Redis, selector, STARK pool | c5.24xlarge | ~$4.08/hr | ~$8.16 |
+| Manager | Redis, selector, request-handler | c5.2xlarge | ~$0.34/hr | ~$0.68 |
 | Worker | SNARK pool only | c5.24xlarge | ~$4.08/hr | ~$8.16 |
 | k6 | Load generator | c5.2xlarge | ~$0.34/hr | ~$0.68 |
-| **Total** | | | | **~$17.00** |
+| **Total** | | | | **~$9.52** |
 
 ---
 
-## Scale reference (alternate worker counts)
+## Scale reference (alternate SNARK worker counts)
 
-The default deployment is 80+80. To run a smaller scale (e.g. for a quick budget-saving session), change the deploy.replicas before deploying, or scale live:
+The default deployment is 80 SNARK workers (STARK=0). To run a smaller SNARK-only scale (e.g. for a quick budget-saving session), scale live:
 
 ```bash
-# On manager — scale both pools to N+N (substitute your N)
-docker service scale zk_snark-verifier=N zk_stark-verifier=N
+# On manager — scale SNARK pool to N workers (substitute your N)
+docker service scale zk_snark-verifier=N
 
 # Sync the selector to the new count
 docker service update \
-  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count N --stark-count N --routing weighted --snark-cost-weight 1.0 --stark-cost-weight 1.0" \
+  --args "python verifierSelector.py --proof-host proof-queue --proof-port 6379 --snark-host snark-queue --snark-port 6379 --stark-host stark-queue --stark-port 6379 --snark-count N --stark-count 0 --routing weighted --snark-cost-weight 1.0 --stark-cost-weight 1.0" \
   zk_verifier-selector
 
-docker service logs zk_verifier-selector --tail 1
-# Must print: "Selector started ... SNARK=N nodes, STARK=N nodes ..."
+TASK=$(docker service ps zk_verifier-selector --filter "desired-state=running" -q)
+docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK | xargs docker logs 2>&1 | head -3
+# Must print: "Selector started ... SNARK=N nodes, STARK=0 nodes ..."
 ```
 
 > The selector keeps an in-memory scoreboard with one slot per worker. If you scale to N workers but the selector still thinks there are 80, workers N..79 will never receive any jobs and the results will look wrong with no error message.
@@ -622,7 +638,7 @@ docker service logs zk_verifier-selector --tail 1
 
 ## Known Architectural Limitations
 
-### Why 80+80 across two nodes (and not 500+500 on a single node)
+### Why 80 SNARK workers across two nodes (and not 500 on a single node)
 
 `snarkjs.groth16.verify` uses `ffjavascript` for BN128 elliptic curve operations. Internally, ffjavascript determines its worker thread count using `os.cpus().length`. Inside a Docker container, `os.cpus()` reports **all host CPUs** (e.g. 96 on a c5.24xlarge) regardless of the container's CPU limit — Docker uses CFS quota-based throttling, not CPU masking.
 
@@ -641,9 +657,9 @@ os.cpus = () => [_realCpus()[0]];
 
 **A second hard limit:** at ~1000 containers on a single node, the Docker overlay VXLAN forwarding table is overwhelmed and service VIPs (used by selector → worker queues) start flapping with `Error 113: No route to host`. Splitting the pools across two nodes keeps each node well below this limit.
 
-**Academic justification** — in a production SaaS deployment, Groth16 verifiers would be compiled Rust binaries (e.g. `arkworks`, `bellman`) completing in <10ms per proof. The bottleneck demonstrated here is specific to Node.js + WASM. The 80+80 configuration validates the routing, queueing, and cost-weighted scheduling architecture — which is the system under study — at meaningful concurrency with real cryptographic work.
+**Academic justification** — in a production SaaS deployment, Groth16 verifiers would be compiled Rust binaries (e.g. `arkworks`, `bellman`) completing in <10ms per proof. The bottleneck demonstrated here is specific to Node.js + WASM. The 80 SNARK worker configuration validates the routing, queueing, and cost-weighted scheduling architecture — which is the system under study — at meaningful concurrency with real cryptographic work.
 
-**To scale beyond 80+80 with real Groth16**: add more worker EC2 nodes to the Swarm. Each additional c5.24xlarge node can host another 80 SNARK workers (80 vCPUs at 1.0 each), giving linear horizontal scaling. 6 worker nodes ≈ 500 SNARK workers. This is the intended production topology for a SaaS ZK verification service.
+**To scale beyond 80 SNARK workers with real Groth16**: add more worker EC2 nodes to the Swarm. Each additional c5.24xlarge node can host another 80 SNARK workers (80 vCPUs at 1.0 each), giving linear horizontal scaling. 6 worker nodes ≈ 500 SNARK workers. This is the intended production topology for a SaaS ZK verification service.
 
 ---
 
@@ -690,8 +706,8 @@ python3 sweep_throughput.py \
 | Manager and worker EC2s can't ping each other; `docker swarm join` times out or worker tasks never schedule | Nodes are in different security groups, or the self-referencing "All traffic" rule is missing. Fix: put both instances in the **same** security group (`zk-authaas-cluster-sg`) and add an inbound rule **All traffic · Source: `<that SG's own ID>`**. See [Step 1](#step-1--create-the-shared-security-group). |
 | `docker: unknown command: docker compose` | Compose V2 not installed. Run the plugin install block in Step 4. |
 | `Cannot connect to Docker daemon` | Forgot to re-login after `usermod -aG docker`. SSH out and back in. |
-| SNARK service stuck at `0/80` on the worker node | Image not built on that node. Re-run the `docker build -f Dockerfile.snark` step on the worker. |
-| SNARK tasks scheduled on the manager (or STARK on the worker) | Node labels missing or wrong. Re-run Step 6 and confirm with `docker node inspect`. |
+| SNARK service stuck at `0/80` on the worker node | Image not built on that node. Re-run `docker build -f Dockerfile.snark -t zk-authaas/snark-verifier:latest .` on the worker. |
+| SNARK tasks scheduled on the manager instead of the worker | Node label missing or wrong. Re-run Step 6: `docker node update --label-add pool=snark $(docker node ls -q --filter role=worker)` and confirm with `docker node inspect`. |
 | `Error: Invalid proof` in SNARK worker logs | `verification_key.json` mismatch — rebuild the SNARK image on the worker: `docker build -f Dockerfile.snark --no-cache -t zk-authaas/snark-verifier:latest .` |
 | k6 `connection refused` on port 8000 | k6 EC2 not in `zk-authaas-cluster-sg`, or you used the manager's **public** IP instead of **private** IP. |
 | Swarm services stuck `pending` | CPU/memory overcommit. Check `docker service ps` and reduce replicas or resource limits. |
@@ -701,6 +717,6 @@ python3 sweep_throughput.py \
 | `docker service scale` stalls, no errors | Kernel inotify limit exhausted (forgot Step 3). Run `sudo sysctl fs.inotify.max_user_instances=8192 && sudo sysctl fs.inotify.max_user_watches=524288`. Scaling resumes within 30 seconds. |
 | Services stuck at `0/N` replicas, task state "New", NODE field empty | Custom subnet overlaps with Swarm's ingress network (`10.0.0.0/24`). The compose file uses `10.1.0.0/20` to avoid this — verify with `docker network inspect ingress \| grep Subnet`. |
 | SNARK jobs stuck at `"processing"`, verifier shows **0% CPU**, never completes | snarkjs/ffjavascript `Atomics.wait()` deadlock — the `os.cpus()` monkey-patch is missing or the SNARK image was built before it was added. Rebuild the SNARK image on the worker, then `docker service update --force zk_snark-verifier`. See [Known Limitations](#known-architectural-limitations). |
-| `verifier-selector` flapping with `Error 113: No route to host` | Overlay VXLAN FDB overwhelmed — only happens above ~1000 containers on one node. The two-node split prevents this. If you see it at 80+80, check that SNARK pool is actually pinned to the worker (Step 6 + Step 8 placement check). |
+| `verifier-selector` flapping with `Error 113: No route to host` | Overlay VXLAN FDB overwhelmed — only happens above ~1000 containers on one node. With 80 SNARK workers on the worker and management services on the manager, both nodes are well below this limit. If you see it at 80 SNARK, check that SNARK pool is actually pinned to the worker (Step 6 + Step 8 placement check). |
 | `docker service logs zk_verifier-selector` shows Redis `ConnectionError` or stale `Dispatch rate: 0.0` from old task IDs after a `service update` | `docker service logs` shows output from **all historical task instances**, not just the current one. Dead containers that failed on startup (e.g. before Redis was ready) appear in the same log stream. Ignore entries from old task IDs. To read only the currently running container: `TASK=$(docker service ps zk_verifier-selector --filter "desired-state=running" -q) && docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK \| xargs docker logs 2>&1 \| head -5` |
 | Swarm network `zk_zk-net` won't remove after `docker stack rm`, hangs indefinitely | Phantom task reference in Swarm raft state. Fix: `docker swarm leave --force && docker swarm init`. |

@@ -69,6 +69,18 @@ services:
     networks:
       - zk-net
 
+  token-queue:
+    image: redis:latest
+    ports:
+      - "6382:6379"
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+    networks:
+      - zk-net
+
   # ------------------------------------------
   # Request Handler (FastAPI)
   # ------------------------------------------
@@ -124,9 +136,9 @@ services:
       - "--stark-port"
       - "6379"
       - "--snark-count"
-      - "80"
+      - "32"
       - "--stark-count"
-      - "80"
+      - "0"
       - "--routing"
       - "weighted"
       - "--snark-cost-weight"
@@ -152,6 +164,7 @@ services:
     depends_on:
       - snark-queue
       - proof-queue
+      - token-queue
     environment:
       # Swarm substitutes the 1-based slot number into this env var;
       # the worker converts it to a 0-based index internally.
@@ -167,8 +180,12 @@ services:
       - "proof-queue"
       - "--proof-queue-port"
       - "6379"
+      - "--token-queue-host"
+      - "token-queue"
+      - "--token-queue-port"
+      - "6379"
     deploy:
-      replicas: 80
+      replicas: 32
       placement:
         constraints:
           - node.labels.pool == snark
@@ -176,6 +193,56 @@ services:
         limits:
           cpus: '1.0'
           memory: 384M
+    networks:
+      - zk-net
+
+  # ------------------------------------------
+  # Token Issuance Worker
+  # Reads verified_queue from token-queue Redis, signs RS256 JWT,
+  # POSTs to app validator, then writes status/token to proof-queue Redis.
+  #
+  # Set APP_EC2_IP in your shell before deploying:
+  #   export APP_EC2_IP=<app-ec2-private-ip>
+  #   docker stack deploy -c docker-compose.yml zk
+  # ------------------------------------------
+  token-issuer:
+    build:
+      context: .
+      dockerfile: Dockerfile.token-issuer
+    image: zk-authaas/token-issuer:latest
+    depends_on:
+      - token-queue
+      - proof-queue
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "--token-queue-host"
+      - "token-queue"
+      - "--token-queue-port"
+      - "6379"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--proof-queue-port"
+      - "6379"
+      - "--private-key-path"
+      - "/etc/zk-authaas/zk-authaas-key.pem"
+      - "--app-url"
+      - "http://${APP_EC2_IP:-127.0.0.1}:9000/ingest"
+      - "--domain-id"
+      - "1"
+      - "--token-ttl"
+      - "3600"
+    volumes:
+      - ./zk-authaas-key.pem:/etc/zk-authaas/zk-authaas-key.pem:ro
+    deploy:
+      replicas: 4
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
     networks:
       - zk-net
 

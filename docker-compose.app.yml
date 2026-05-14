@@ -1,0 +1,37 @@
+version: '3.8'
+
+# Standalone compose for the App EC2 (does NOT join the Swarm).
+# Run with:  docker compose -f docker-compose.app.yml up -d
+#
+# Before starting, set the manager's private IP:
+#   export PROOF_QUEUE_HOST=<manager-private-ip>
+#   docker compose -f docker-compose.app.yml up -d
+#
+# Place zk-authaas-public.pem in the same directory before starting.
+
+services:
+  token-validator:
+    build:
+      context: .
+      dockerfile: Dockerfile.token-validator
+    image: zk-authaas/token-validator:latest
+    ports:
+      - "9000:9000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "--public-key-path"
+      - "/etc/zk-authaas/zk-authaas-public.pem"
+      - "--expected-domain-id"
+      - "1"
+      - "--proof-queue-host"
+      - "${PROOF_QUEUE_HOST:?Set PROOF_QUEUE_HOST to manager private IP}"
+      - "--proof-queue-port"
+      - "6379"
+      - "--workers"
+      - "4"
+      - "--port"
+      - "9000"
+    volumes:
+      - ./zk-authaas-public.pem:/etc/zk-authaas/zk-authaas-public.pem:ro
+    restart: unless-stopped
