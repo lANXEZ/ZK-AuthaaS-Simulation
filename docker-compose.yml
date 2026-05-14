@@ -199,10 +199,15 @@ services:
   # ------------------------------------------
   # Token Issuance Worker
   # Reads verified_queue from token-queue Redis, signs RS256 JWT,
-  # POSTs to app validator, then writes status/token to proof-queue Redis.
+  # POSTs {job_id, token} to the target app's /ingest endpoint
+  # (target_app comes from target:{job_id} side-table written by request-handler).
   #
-  # Set APP_EC2_IP in your shell before deploying:
-  #   export APP_EC2_IP=<app-ec2-private-ip>
+  # Set APP0_IP..APP4_IP in your shell before deploying (matching domain 0..4):
+  #   export APP0_IP=<app0-private-ip>
+  #   export APP1_IP=<app1-private-ip>
+  #   export APP2_IP=<app2-private-ip>
+  #   export APP3_IP=<app3-private-ip>
+  #   export APP4_IP=<app4-private-ip>
   #   docker stack deploy -c docker-compose.yml zk
   # ------------------------------------------
   token-issuer:
@@ -226,10 +231,8 @@ services:
       - "6379"
       - "--private-key-path"
       - "/etc/zk-authaas/zk-authaas-key.pem"
-      - "--app-url"
-      - "http://${APP_EC2_IP:-127.0.0.1}:9000/ingest"
-      - "--domain-id"
-      - "1"
+      - "--app-urls"
+      - "http://${APP0_IP:-127.0.0.1}:9000/ingest,http://${APP1_IP:-127.0.0.1}:9000/ingest,http://${APP2_IP:-127.0.0.1}:9000/ingest,http://${APP3_IP:-127.0.0.1}:9000/ingest,http://${APP4_IP:-127.0.0.1}:9000/ingest"
       - "--token-ttl"
       - "3600"
     volumes:

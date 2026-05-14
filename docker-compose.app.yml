@@ -1,9 +1,10 @@
 version: '3.8'
 
-# Standalone compose for the App EC2 (does NOT join the Swarm).
-# Run with:  docker compose -f docker-compose.app.yml up -d
+# Standalone compose for each App EC2 (does NOT join the Swarm).
+# Used for all 5 apps — only DOMAIN_ID differs per instance.
 #
-# Before starting, set the manager's private IP:
+# Run with:
+#   export DOMAIN_ID=<0..4>            # this app's identity
 #   export PROOF_QUEUE_HOST=<manager-private-ip>
 #   docker compose -f docker-compose.app.yml up -d
 #
@@ -23,7 +24,7 @@ services:
       - "--public-key-path"
       - "/etc/zk-authaas/zk-authaas-public.pem"
       - "--expected-domain-id"
-      - "1"
+      - "${DOMAIN_ID:?Set DOMAIN_ID to this app's number (0..4)}"
       - "--proof-queue-host"
       - "${PROOF_QUEUE_HOST:?Set PROOF_QUEUE_HOST to manager private IP}"
       - "--proof-queue-port"

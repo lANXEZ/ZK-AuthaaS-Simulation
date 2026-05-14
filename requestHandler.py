@@ -23,22 +23,35 @@ rProofQueue = redis.Redis(host=args.redis_host, port=args.redis_port, db=0, deco
 async def submit_request(payload: dict):
     # 1. Generate a unique tracking ID for this specific proof
     job_id = str(uuid.uuid4())
-    
-    # 2. Prepare the data package for the worker node
+
+    # 2. domain_id (0..4) — which application this request is destined for.
+    # Becomes the JWT's domainID claim and routes the token to the matching app.
+    # Stored as side-table domain:{job_id} so the token-issuer can read it
+    # without modifying the selector/verifier.
+    domain_id = payload.get("domain_id", 0)
+    try:
+        domain_id = int(domain_id)
+    except (TypeError, ValueError):
+        domain_id = 0
+    if domain_id < 0 or domain_id > 4:
+        domain_id = 0
+    rProofQueue.set(f"domain:{job_id}", str(domain_id), ex=3600)
+
+    # 3. Prepare the data package for the worker node
     job_data = {
         "job_id": job_id,
         "payload": payload
     }
-    
-    # 3. Create a status tracker in Redis and set it to 'pending'
+
+    # 4. Create a status tracker in Redis and set it to 'pending'
     # 'ex=3600' automatically deletes this tracker after 1 hour to prevent memory leaks
     rProofQueue.set(f"status:{job_id}", "pending", ex=3600)
-    
-    # 4. Push the actual job onto the queue for the worker to process
+
+    # 5. Push the actual job onto the queue for the worker to process
     rProofQueue.lpush("proof_queue", json.dumps(job_data))
-    
-    # 5. Return the Job ID immediately to k6
-    return {"status": "accepted", "job_id": job_id}
+
+    # 6. Return the Job ID immediately to k6
+    return {"status": "accepted", "job_id": job_id, "domain_id": domain_id}
 
 
 # ==========================================

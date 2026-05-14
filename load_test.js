@@ -3,80 +3,78 @@ import { check, sleep } from 'k6';
 import { Trend, Counter } from 'k6/metrics';
 
 // ==========================================
-// ZK-AuthaaS Load Test
+// ZK-AuthaaS E2E Load Test (5-domain routing)
 // ==========================================
-// Works with the Swarm-deployed stack (both locally and on EC2).
+// Distributes requests across 5 apps by domainID (0..4) with phase-based
+// weights. Each phase has its own duration and weight vector — change
+// weights mid-test by editing the PHASES array below.
 //
 // USAGE:
-//   Local Swarm (defaults to localhost:8000):
-//     k6 run load_test.js
+//   k6 run -e TARGET=<manager-ip> load_test.js
+//   k6 run -e TARGET=<manager-ip> -e VUS=200 -e ITERATIONS=20000 load_test.js
+//   k6 run -e TARGET=<manager-ip> load_test.js --out csv=test_results_e2e.csv
 //
-//   Against an EC2 instance:
-//     k6 run -e TARGET=172.31.45.12 load_test.js
-//
-//   Custom load profile:
-//     k6 run -e VUS=100 -e ITERATIONS=2000 load_test.js
-//
-//   Pure SNARK / pure STARK / mixed:
-//     k6 run -e STARK_RATIO=0.0 load_test.js   # all SNARK
-//     k6 run -e STARK_RATIO=1.0 load_test.js   # all STARK
-//     k6 run -e STARK_RATIO=0.5 load_test.js   # 50/50 mix (default)
-//
-//   With CSV output for visualize_k6.py:
-//     k6 run -e TARGET=localhost load_test.js --out csv=test_results.csv
-//
-// SUGGESTED PROFILES:
-//   Local laptop (10+10 verifiers):          VUS=50   ITERATIONS=500
-//   c5.4xlarge spot (50+50 verifiers):       VUS=200  ITERATIONS=5000
-//   c5.24xlarge spot (500+500, full run):    VUS=1000 ITERATIONS=50000
+// PER-DOMAIN METRICS:
+//   Every metric is tagged with domain=<0..4>. The CSV output's `extra_tags`
+//   column contains `domain=N` so visualize_k6_per_app.py can group results.
 // ==========================================
 
-// ------------------------------------------
-// Configuration (override via env vars)
-// ------------------------------------------
 const TARGET_IP = __ENV.TARGET || 'localhost';
 const PORT = __ENV.PORT || '8000';
 const BASE_URL = `http://${TARGET_IP}:${PORT}`;
 
-// Fraction of requests that should be STARK (0.0 = all SNARK, 1.0 = all STARK)
-const STARK_RATIO = parseFloat(__ENV.STARK_RATIO || '0.5');
-
-// Load profile
 const VUS = parseInt(__ENV.VUS || '300');
 const ITERATIONS = parseInt(__ENV.ITERATIONS || '3000');
 const MAX_DURATION = __ENV.MAX_DURATION || '15m';
 
 // ------------------------------------------
-// Custom metrics
+// Distribution phases — edit to change pattern over time.
+// Each phase: { duration: seconds, weights: [domain0, domain1, domain2, domain3, domain4] }
+// Weights are relative; they do NOT need to sum to 100.
+// After all phases elapse, the last phase's weights are used until test ends.
 // ------------------------------------------
-const asyncVerificationTime = new Trend('async_verification_time');
-const snarkVerificationTime = new Trend('snark_verification_time');
-const starkVerificationTime = new Trend('stark_verification_time');
-const failedVerifications = new Counter('failed_verifications');
+const PHASES = [
+  { duration: 15, weights: [60, 10, 10, 10, 10] },   // domain 0 hot
+  { duration: 15, weights: [10, 60, 10, 10, 10] },   // domain 1 hot (mid-test switch)
+  { duration: 15, weights: [10, 10, 60, 10, 10] },   // domain 2 hot
+  { duration: 15, weights: [10, 10, 10, 60, 10] },   // domain 3 hot
+  { duration: 15, weights: [10, 10, 10, 10, 60] },   // domain 4 hot
+  { duration: 60, weights: [20, 20, 20, 20, 20] },   // even
+];
+
+// Precompute cumulative end times for fast lookup
+let _cum = 0;
+const PHASE_TABLE = PHASES.map(p => { _cum += p.duration; return { endAt: _cum, weights: p.weights }; });
+
+// ------------------------------------------
+// Custom metrics (all tagged with domain=N)
+// ------------------------------------------
+const e2eLatency = new Trend('e2e_latency', true);
+const submitsByDomain = new Counter('submits_by_domain');
+const completedByDomain = new Counter('completed_by_domain');
+const failedByDomain = new Counter('failed_by_domain');
 const submitFailures = new Counter('submit_failures');
 
 // ------------------------------------------
-// k6 options
+// k6 scenario
 // ------------------------------------------
 export const options = {
   scenarios: {
-    batch_processing_test: {
+    e2e_test: {
       executor: 'shared-iterations',
       iterations: ITERATIONS,
       vus: VUS,
       maxDuration: MAX_DURATION,
     },
   },
-  // Summary thresholds (optional - k6 marks run as failed if any breach)
   thresholds: {
-    'async_verification_time': ['p(95)<30000'],  // 95% of requests finish in <30s
-    'failed_verifications': ['count<10'],        // fewer than 10 failures overall
+    'e2e_latency': ['p(95)<30000'],
+    'submit_failures': ['count<10'],
   },
 };
 
 // ------------------------------------------
-// Static SNARK proof/public signals (same valid proof reused every request)
-// Sourced from verification_key.json / proof.json / public.json
+// SNARK proof (reused every request)
 // ------------------------------------------
 const SNARK_PROOF = {
   pi_a: [
@@ -114,102 +112,81 @@ const SNARK_PUBLIC_SIGNALS = [
 ];
 
 // ------------------------------------------
+// Test start timestamp shared across VUs
+// ------------------------------------------
+export function setup() {
+  return { testStart: Date.now() };
+}
+
+// ------------------------------------------
+// Phase + weighted-domain picker
+// ------------------------------------------
+function pickDomainId(testStart) {
+  const elapsedSec = (Date.now() - testStart) / 1000;
+  // Find first phase whose endAt > elapsed; fall back to last
+  let phase = PHASE_TABLE[PHASE_TABLE.length - 1];
+  for (let i = 0; i < PHASE_TABLE.length; i++) {
+    if (elapsedSec < PHASE_TABLE[i].endAt) { phase = PHASE_TABLE[i]; break; }
+  }
+  const weights = phase.weights;
+  const total = weights[0] + weights[1] + weights[2] + weights[3] + weights[4];
+  let r = Math.random() * total;
+  for (let i = 0; i < 5; i++) {
+    r -= weights[i];
+    if (r < 0) return i;
+  }
+  return 4;
+}
+
+// ------------------------------------------
 // Main VU function
 // ------------------------------------------
-export default function () {
-  // Jitter to stagger the initial TCP connection storm across VUs
-  sleep(Math.random());
+export default function (data) {
+  sleep(Math.random() * 0.5);
 
-  // Randomize scheme per iteration so both verifier pools get exercised.
-  // This is what actually stress-tests your verifier selector's routing.
-  //const scheme = Math.random() < STARK_RATIO ? 'stark' : 'snark';
-  const scheme = 'snark'; // For pure SNARK testing, uncomment this line and comment the above line.
+  const domainId = pickDomainId(data.testStart);
+  const domainTag = { domain: String(domainId) };
 
-  const submitUrl = `${BASE_URL}/verify/submit`;
-
-  const payload = JSON.stringify(
-    scheme === 'snark'
-      ? { scheme, proof: SNARK_PROOF, public_inputs: SNARK_PUBLIC_SIGNALS }
-      : { scheme, proof: 'zk_proof_data_here', public_inputs: ['input_1', 'input_2'] }
-  );
-  const params = {
-    headers: { 'Content-Type': 'application/json' },
-  };
-
-  // --------------------------------------
-  // PHASE 1: Submit to the request handler
-  // --------------------------------------
-  const startTime = Date.now();
-  const submitRes = http.post(submitUrl, payload, params);
-
-  const submitOk = check(submitRes, {
-    'accepted by queue': (r) => r.status === 202 || r.status === 200,
+  const payload = JSON.stringify({
+    scheme: 'snark',
+    proof: SNARK_PROOF,
+    public_inputs: SNARK_PUBLIC_SIGNALS,
+    domain_id: domainId,
   });
+  const params = { headers: { 'Content-Type': 'application/json' } };
 
-  if (!submitOk) {
-    submitFailures.add(1);
+  const submitStart = Date.now();
+  const submitRes = http.post(`${BASE_URL}/verify/submit`, payload, params);
+
+  if (!check(submitRes, { 'accepted': (r) => r.status === 200 || r.status === 202 })) {
+    submitFailures.add(1, domainTag);
     return;
   }
 
   let jobId;
-  try {
-    jobId = submitRes.json('job_id');
-  } catch (e) {
-    submitFailures.add(1);
-    return;
-  }
+  try { jobId = submitRes.json('job_id'); } catch (e) { submitFailures.add(1, domainTag); return; }
+  if (!jobId) { submitFailures.add(1, domainTag); return; }
 
-  if (!jobId) {
-    submitFailures.add(1);
-    return;
-  }
+  submitsByDomain.add(1, domainTag);
 
-  // --------------------------------------
-  // PHASE 2: Poll for status
-  // --------------------------------------
-  // Desynchronized polling (0.5s to 1.5s jitter) avoids synchronized
-  // polling spikes that would smear the latency graph.
-  let isDone = false;
-  let attempts = 0;
+  // Poll for completion
   let finalStatus = '';
-  const maxAttempts = 120;  // ~120s max wait
-
-  while (!isDone && attempts < maxAttempts) {
-    sleep(0.1 + Math.random() * 0.2);  // 0.1 to 0.3 seconds
-
-    const checkUrl = `${BASE_URL}/verify/status/${jobId}`;
-    const checkRes = http.get(checkUrl);
-
-    try {
-      finalStatus = checkRes.json('status');
-    } catch (e) {
-      finalStatus = 'error';
-    }
-
-    if (finalStatus === 'completed' || finalStatus === 'failed') {
-      isDone = true;
-    }
-    attempts++;
+  const maxAttempts = 120;
+  for (let attempts = 0; attempts < maxAttempts; attempts++) {
+    sleep(0.1 + Math.random() * 0.2);
+    const checkRes = http.get(`${BASE_URL}/verify/status/${jobId}`);
+    try { finalStatus = checkRes.json('status'); } catch (e) { finalStatus = 'error'; }
+    if (finalStatus === 'completed' || finalStatus === 'failed') break;
   }
 
-  // --------------------------------------
-  // PHASE 3: Record metrics & validate
-  // --------------------------------------
-  const endTime = Date.now();
-  const totalProcessingTime = endTime - startTime;
+  const totalMs = Date.now() - submitStart;
 
   if (finalStatus === 'completed') {
-    asyncVerificationTime.add(totalProcessingTime);
-    if (scheme === 'snark') {
-      snarkVerificationTime.add(totalProcessingTime);
-    } else {
-      starkVerificationTime.add(totalProcessingTime);
-    }
+    e2eLatency.add(totalMs, domainTag);
+    completedByDomain.add(1, domainTag);
   } else {
-    failedVerifications.add(1);
+    failedByDomain.add(1, domainTag);
   }
 
-  check(finalStatus, {
-    'verification fully completed': (s) => s === 'completed',
-  });
+  check(finalStatus, { 'verification completed': (s) => s === 'completed' });
 }
