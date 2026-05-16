@@ -280,6 +280,9 @@ sudo curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker
 sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 docker compose version   # must print: Docker Compose version v2.27.0
 
+# jq — used in Step 9 sanity-check curls to pretty-print JSON responses
+sudo apt install -y jq
+
 # Clone the project repo (zk-authaas-public.pem is tracked, so no scp is needed).
 # zk-authaas-ec2-key.pem is gitignored, but the manager does NOT need it —
 # Docker Swarm handles inter-node communication with its own TLS certs.
@@ -424,16 +427,35 @@ docker service ls
 Confirm each of the 5 apps receives its own traffic.
 
 ```bash
-# On Manager EC2 — submit one job per domain
+# On Manager EC2 — uses the same valid groth16 proof embedded in load_test.js.
+# A stub proof:{} cannot be used here — snarkjs throws on the first proof field
+# access and the job is marked "failed" before the token-issuer ever sees it.
+PROOF_JSON='{
+  "pi_a": ["16893334615242764580836222078829142520432756203770466604081032720388657032757","5095606969395716303621702958471922376961618029789842152295821108717087682311","1"],
+  "pi_b": [["13772398192624595577472662855811728500397412494267729711099372526485968374649","15249941699599606024139723272508104548269790148997217612719623411267570558493"],["19735295879188043871505513529932228526631701925990878770250928234435443795397","11046809327765151786114304454515091703284305019483922364766276175300463695885"],["1","0"]],
+  "pi_c": ["18536201733965390491456176988021021022761142364866628667452517360063595662975","15291715715367874403418883228408929985980666544091293542955491873294267230352","1"],
+  "protocol": "groth16",
+  "curve": "bn128"
+}'
+PUB='["1120771572304984668855649788542860110303223894298952018121329196339919157573","20197087425205130352574209034729275460185533126585197591053247747830393653846","111222333","444555666","1764263975784332459809300572476310454427845461305579380554772042455913567929","10988278040513707334400680073433620711051179041727267619401283491695328957763"]'
+
+# Submit one job per domain
+declare -A JOB_IDS
 for N in 0 1 2 3 4; do
-  curl -s -X POST http://localhost:8000/verify/submit \
+  JID=$(curl -s -X POST http://localhost:8000/verify/submit \
     -H "Content-Type: application/json" \
-    -d "{\"scheme\":\"snark\",\"proof\":{},\"public_inputs\":[\"12345\"],\"domain_id\":$N}" | jq .
+    -d "{\"scheme\":\"snark\",\"proof\":$PROOF_JSON,\"public_inputs\":$PUB,\"domain_id\":$N}" | jq -r .job_id)
+  JOB_IDS[$N]=$JID
+  echo "domain $N → $JID"
 done
 
-# Wait ~3s, then poll one of the job_ids
-curl -s http://localhost:8000/verify/status/<JOB_ID> | jq .
-# Expected: {"job_id":"...","status":"completed"}
+# Wait a few seconds, then poll all 5
+sleep 5
+for N in 0 1 2 3 4; do
+  echo "--- domain $N ---"
+  curl -s http://localhost:8000/verify/status/${JOB_IDS[$N]} | jq .
+done
+# Expected: every status == "completed"
 
 # Confirm each app saw traffic (their /health queue_size resets to 0 fast)
 for IP in $APP0_IP $APP1_IP $APP2_IP $APP3_IP $APP4_IP; do

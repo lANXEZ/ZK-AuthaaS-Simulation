@@ -137,11 +137,13 @@ def extract_metrics(summary, vus, iterations, stark_ratio):
 
     iter_metric = metrics.get("iterations", {})
     http_dur = metrics.get("http_req_duration", {})
-    async_trend = metrics.get("async_verification_time", {})
-    snark_trend = metrics.get("snark_verification_time", {})
-    stark_trend = metrics.get("stark_verification_time", {})
+    # load_test.js emits a single Trend `e2e_latency` covering the full
+    # submit -> validator-write-back round trip. The visualiser still reads
+    # `async_*_ms` column names, so we map e2e_latency into those columns.
+    e2e_trend = metrics.get("e2e_latency", {})
 
-    failed_verifications = get(metrics.get("failed_verifications"), "count", 0)
+    # Counters: failed_by_domain is the per-iteration failure tally.
+    failed_verifications = get(metrics.get("failed_by_domain"), "count", 0)
     submit_failures = get(metrics.get("submit_failures"), "count", 0)
 
     completed = get(iter_metric, "count", 0)
@@ -153,13 +155,11 @@ def extract_metrics(summary, vus, iterations, stark_ratio):
         "target_iterations": iterations,
         "completed_iterations": int(completed),
         "throughput_req_per_sec": round(throughput, 2),
-        "async_avg_ms": round(get(async_trend, "avg", 0), 1),
-        "async_p50_ms": round(get(async_trend, "med", 0), 1),
-        "async_p95_ms": round(get(async_trend, "p(95)", 0), 1),
-        "async_p99_ms": round(get(async_trend, "p(99)", 0), 1),
-        "async_max_ms": round(get(async_trend, "max", 0), 1),
-        "snark_p95_ms": round(get(snark_trend, "p(95)", 0), 1),
-        "stark_p95_ms": round(get(stark_trend, "p(95)", 0), 1),
+        "async_avg_ms": round(get(e2e_trend, "avg", 0), 1),
+        "async_p50_ms": round(get(e2e_trend, "med", 0), 1),
+        "async_p95_ms": round(get(e2e_trend, "p(95)", 0), 1),
+        "async_p99_ms": round(get(e2e_trend, "p(99)", 0), 1),
+        "async_max_ms": round(get(e2e_trend, "max", 0), 1),
         "http_p95_ms": round(get(http_dur, "p(95)", 0), 1),
         "failed_verifications": int(failed_verifications),
         "submit_failures": int(submit_failures),
