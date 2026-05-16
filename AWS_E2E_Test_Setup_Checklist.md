@@ -25,32 +25,112 @@ Each app validates only tokens whose `domainID` claim matches its assigned ID �
 - [ ] Confirm `zk-authaas-key.pem` and `zk-authaas-public.pem` exist in project root
   - Already generated — do **not** regenerate (would invalidate the public key on the App EC2)
 - [ ] Note `zk-authaas-key.pem` is in `.gitignore` — never commit it
-- [ ] Have your EC2 key pair (`zk-authaas-key.pem`) ready for SSH
+- [ ] Have your EC2 key pair (`zk-authaas-ec2-key.pem`) ready for SSH
 
 ---
 
-## Step 1 — Launch EC2 Instances (AWS Console / CLI)
+## Step 1 — Create the shared security group and launch EC2 instances
 
-Launch all 8 instances as **Spot** instances in the **same VPC and subnet** (so private IPs can reach each other).
+### Step 1a — Create the shared security group
 
-```
-Manager   : c5.xlarge   — Ubuntu 22.04 LTS, 30 GB gp3
-Worker    : c5.9xlarge  — Ubuntu 22.04 LTS, 30 GB gp3
-k6        : c5.large    — Ubuntu 22.04 LTS, 20 GB gp3
-App 0..4  : c5.xlarge   — Ubuntu 22.04 LTS, 20 GB gp3  (5 identical instances, name them app-0 through app-4)
-```
+All 8 instances (manager, worker, k6, and all 5 apps) **must share a single security group**. Docker Swarm overlay networking (VXLAN), Redis cross-node access, and token-issuer → app HTTP traffic all use multiple ports — the easiest and most reliable approach is a self-referencing "All traffic" rule that lets any instance in the group talk freely to any other.
 
-Security group rules (all within VPC):
-- Manager ← Worker, k6     : port 2377 (Swarm join), 6379-6382 (Redis), 8000 (API)
-- Manager ← App 0..4       : port 6379 (proof-queue Redis write-back from each validator)
-- App 0..4 ← Manager       : port 9000 (token-issuer POST /ingest)
-- k6      → Manager        : port 8000
-- SSH: port 22 from your IP
+> ⚠️ **Do not create separate security groups per role.** If manager and worker are in different groups, Swarm intra-cluster traffic is blocked and container scheduling will fail silently. If the app EC2s are in a separate group, token-issuer `/ingest` POSTs and validator write-backs to proof-queue Redis will both be dropped.
 
-> **Tip:** put all 8 instances in a single security group that allows "All traffic" from itself — same approach as the SNARK-only checklist. Saves rule sprawl.
+**In the AWS Console — EC2 → Security Groups → Create security group:**
 
-Record private IPs — you will need them:
-```
+| Field | Value |
+|---|---|
+| Name | `zk-authaas-cluster-sg` |
+| Description | Shared SG for all ZK-AuthaaS E2E nodes (manager, worker, k6, apps 0–4) |
+| VPC | *(your default VPC — the same one all 8 EC2s will go into)* |
+
+**Inbound rules — add all three:**
+
+| # | Type | Protocol | Port | Source | What to enter in the Source field | Purpose |
+|---|---|---|---|---|---|---|
+| 1 | SSH | TCP | 22 | My IP | Click **"My IP"** in the dropdown — AWS fills in your current public IP automatically | SSH from your laptop to any of the 8 EC2s |
+| 2 | Custom TCP | TCP | 8000 | My IP | Same as rule 1 — click **"My IP"** | Direct `curl` to the FastAPI backend from your laptop (sanity checks) |
+| 3 | All traffic | All | All | Custom | Type `sg-` in the Source box, then select **this same security group** from the autocomplete dropdown (e.g. `sg-0abc123def456 / zk-authaas-cluster-sg`). This is the self-referencing rule. | All inter-node traffic: Swarm, Redis, token-issuer → /ingest, app write-backs to proof-queue |
+
+> **Where to find each value:**
+> - **My IP (rules 1 & 2):** AWS fills this automatically when you select "My IP" — no need to look it up. If your laptop IP changes between sessions, edit rules 1 & 2 and click "My IP" again.
+> - **Security group ID (rule 3):** EC2 Console → Security Groups → click `zk-authaas-cluster-sg` → copy the **Security group ID** at the top (`sg-xxxxxxxxxxxxxxxxx`). Then type `sg-` in the Source field and pick it from the dropdown.
+
+> **Rule 3 (self-referencing) must be added after the group is first saved:**
+> 1. Save the new SG — note its ID (`sg-xxxxxxxxxxxxxxxxx`)
+> 2. Edit inbound rules → Add rule
+> 3. Type: **All traffic** · Source: type `sg-` and select **this same security group** from the dropdown
+> 4. Save rules
+
+**You do not need to open these ports individually.** Rule 3 already covers all of them — this table is for reference only:
+
+| Port(s) | Protocol | Used by |
+|---|---|---|
+| 2377 | TCP | Swarm cluster management (`docker swarm join`, leader election) |
+| 7946 | TCP + UDP | Container network discovery (gossip between Swarm nodes) |
+| 4789 | UDP | VXLAN overlay — tunnel carrying all container-to-container traffic across nodes |
+| 6379 | TCP | proof-queue Redis — request-handler writes job metadata; app validators write `status:{job_id}` back |
+| 6380 | TCP | snark-queue Redis — selector → SNARK verifiers |
+| 6381 | TCP | stark-queue Redis (unused in SNARK-only mode, reserved) |
+| 6382 | TCP | token-queue Redis — SNARK verifiers push to `verified_queue`; token-issuer consumes from it |
+| 8000 | TCP | FastAPI request-handler — k6 submits proofs and polls job status here |
+| 9000 | TCP | TokenValidatorService on each App EC2 — token-issuer POSTs `/ingest` here |
+
+---
+
+### Step 1b — Launch all 8 EC2 instances
+
+All 8 instances go into the **same VPC, same subnet (same Availability Zone), same security group `zk-authaas-cluster-sg`**. Same-AZ placement matters because cross-AZ overlay traffic adds latency and AWS data-transfer fees.
+
+**Manager EC2:**
+- [ ] EC2 → Launch Instance
+- [ ] Name: `zk-authaas-manager` · AMI: **Ubuntu 22.04 LTS** · Type: **`c5.xlarge`** (4 vCPU / 8 GiB)
+- [ ] Key pair: `zk-authaas-key`
+- [ ] Security group: **`zk-authaas-cluster-sg`**
+- [ ] Storage: **30 GiB gp3**
+- [ ] Record **Public IPv4** (for SSH) and **Private IPv4** (for inter-node and k6 communication)
+
+**Worker EC2:**
+- [ ] EC2 → Launch Instance
+- [ ] Name: `zk-authaas-worker` · AMI: **Ubuntu 22.04 LTS** · Type: **`c5.9xlarge`** (36 vCPU / 72 GiB)
+- [ ] Key pair: `zk-authaas-key`
+- [ ] Security group: **`zk-authaas-cluster-sg`** (same as manager)
+- [ ] **Same VPC and Subnet as manager** (verify the AZ matches)
+- [ ] Storage: **30 GiB gp3**
+- [ ] Record **Public IPv4** and **Private IPv4**
+
+**k6 loader EC2:**
+- [ ] EC2 → Launch Instance
+- [ ] Name: `zk-authaas-k6` · AMI: **Ubuntu 22.04 LTS** · Type: **`c5.large`** (2 vCPU / 4 GiB)
+- [ ] Key pair: `zk-authaas-key`
+- [ ] Security group: **`zk-authaas-cluster-sg`** (the self-referencing rule lets it reach the manager on :8000 automatically)
+- [ ] Same VPC and Subnet as the backends
+- [ ] Storage: **20 GiB gp3**
+- [ ] Record **Public IPv4** (for SSH and `scp`)
+
+**App EC2s — repeat for each domain (5 instances total):**
+
+All 5 are identical in configuration. The `DOMAIN_ID` (0–4) is set at runtime via an environment variable — nothing is baked into the image.
+
+- [ ] EC2 → Launch Instance — **repeat this block 5 times**, naming each `zk-authaas-app-0` through `zk-authaas-app-4`
+- [ ] AMI: **Ubuntu 22.04 LTS** · Type: **`c5.xlarge`** (4 vCPU / 8 GiB)
+- [ ] Key pair: `zk-authaas-key`
+- [ ] Security group: **`zk-authaas-cluster-sg`** (same group — covers `/ingest` and proof-queue write-backs)
+- [ ] Same VPC and Subnet as manager
+- [ ] Storage: **20 GiB gp3**
+- [ ] Record **Public IPv4** (for SSH/`scp`) and **Private IPv4** (token-issuer routes to this IP)
+
+> **Tip — launch all 5 app instances in one go:** on the Launch Instance page set **Number of instances** to 5, then rename each one from the EC2 console after launch (`zk-authaas-app-0` through `zk-authaas-app-4`).
+
+---
+
+### Step 1c — Record all private IPs
+
+Fill this in immediately after all 8 instances reach the `running` state. You will need these values in every subsequent step.
+
+```bash
+# Fill in your actual private IPs — keep this block handy throughout the session
 MANAGER_IP=<private-ip>
 WORKER_IP=<private-ip>
 K6_IP=<private-ip>
@@ -60,6 +140,32 @@ APP2_IP=<private-ip>
 APP3_IP=<private-ip>
 APP4_IP=<private-ip>
 ```
+
+---
+
+### Step 1d — Connectivity sanity check
+
+Run this before starting any Docker setup — it catches security group misconfiguration early.
+
+```bash
+# SSH into manager
+ssh -i zk-authaas-key.pem ubuntu@<manager-public-ip>
+
+# Ping every other node by private IP
+ping -c3 $WORKER_IP
+# Expected: 0% packet loss
+
+ping -c3 $K6_IP
+# Expected: 0% packet loss
+
+for IP in $APP0_IP $APP1_IP $APP2_IP $APP3_IP $APP4_IP; do
+  echo "--- $IP ---"
+  ping -c2 $IP
+done
+# Expected: 0% packet loss for all 5 app nodes
+```
+
+If any ping fails, re-check that **all 8 EC2s are in `zk-authaas-cluster-sg`** and that rule 3 (self-referencing All traffic) was saved correctly. Do not proceed to Step 2 until all nodes can reach each other.
 
 ---
 
