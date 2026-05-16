@@ -589,18 +589,24 @@ cd ~/zk-authaas && git pull && cd ~
 # On k6 EC2 (inside tmux, after ulimit)
 ulimit -n 65536
 
+# Duration-based mode (recommended for the shifting-focus test).
+# Setting DURATION switches load_test.js to the `constant-vus` executor —
+# k6 runs for exactly that long regardless of throughput, so all 5 phase
+# windows always complete.
 k6 run \
   -e TARGET=<manager-private-ip> \
   -e VUS=<KNEE_VU> \
-  -e ITERATIONS=<KNEE_VU * 20> \
-  -e MAX_DURATION=3m \
+  -e DURATION=120s \
   load_test.js \
   --out csv=test_results_e2e.csv
 ```
 
-> **ITERATIONS guidance:** `KNEE_VU * 20` is a conservative minimum that ensures all 5 phase windows
-> (5 × 20 s = 100 s total) complete before the iteration pool exhausts.  
-> Example: KNEE_VU = 400 → use `ITERATIONS=8000` and `MAX_DURATION=3m`.
+> **DURATION sizing:** all 5 phase windows are 20 s each = 100 s total. Use **120 s** so
+> the last phase has a clean trailing window before the test stops.
+>
+> The older `ITERATIONS=…` form (shared-iterations executor) still works — it's what
+> `sweep_throughput.py` uses internally. Use DURATION for time-bounded characterisation
+> tests; use ITERATIONS for fixed-work sweeps where you care about per-VU iteration count.
 
 **What to expect during the run:**
 

@@ -26,6 +26,10 @@ const BASE_URL = `http://${TARGET_IP}:${PORT}`;
 const VUS = parseInt(__ENV.VUS || '300');
 const ITERATIONS = parseInt(__ENV.ITERATIONS || '3000');
 const MAX_DURATION = __ENV.MAX_DURATION || '15m';
+// If DURATION is set (e.g. "120s"), the test runs for exactly that long with
+// `constant-vus`. Otherwise it falls back to the old `shared-iterations` mode
+// driven by ITERATIONS (still used by the sweep script).
+const DURATION = __ENV.DURATION || '';
 
 // ------------------------------------------
 // Distribution phases — each domain gets 20 s in the spotlight.
@@ -59,12 +63,18 @@ const submitFailures = new Counter('submit_failures');
 // ------------------------------------------
 export const options = {
   scenarios: {
-    e2e_test: {
-      executor: 'shared-iterations',
-      iterations: ITERATIONS,
-      vus: VUS,
-      maxDuration: MAX_DURATION,
-    },
+    e2e_test: DURATION
+      ? {
+          executor: 'constant-vus',
+          vus: VUS,
+          duration: DURATION,
+        }
+      : {
+          executor: 'shared-iterations',
+          iterations: ITERATIONS,
+          vus: VUS,
+          maxDuration: MAX_DURATION,
+        },
   },
   thresholds: {
     'e2e_latency': ['p(95)<30000'],
