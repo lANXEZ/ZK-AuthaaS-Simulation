@@ -1,25 +1,26 @@
-import redis
+import asyncio
+import argparse
 import json
 import time
-import argparse
-import requests
+
+import httpx
 import jwt
+import redis.asyncio as redis
 
 # Reads verified jobs from token-queue Redis (verified_queue), signs a RS256 JWT,
 # and POSTs {job_id, token} to the target app's /ingest endpoint.
 #
-# Multi-app routing:
-#   For each job, GET domain:{job_id} from proof-queue Redis to discover which
-#   domain (0..4) this request was destined for. Sign the JWT with domainID=N
-#   and POST to APP_URLS[N]. Defaults to 0 if missing.
+# Concurrency model:
+#   - N coroutine workers all BRPOP from verified_queue concurrently
+#   - All share one httpx.AsyncClient with a connection-pool of size N
+#     so POSTs reuse keep-alive connections (no TCP setup per request).
+#   - Each worker handles its own job end-to-end: BRPOP → look up domain
+#     → sign JWT → POST → status write-back on HTTP failure.
 #
-# The app handles validation and writes status:{job_id} back to proof-queue Redis.
-# This module only writes status=failed on HTTP failure (app unreachable).
-#
-# Queue entry format (from SNARKVerifierWorker.js):
-#   {"job_id": "...", "scheme": "snark", "public_inputs": [...], "verified_at": ...}
+# This replaces a synchronous requests.post()-per-job loop that was capped
+# at ~2 jobs/s/replica due to per-call TCP handshakes.
 
-parser = argparse.ArgumentParser(description="Token Issuance Worker")
+parser = argparse.ArgumentParser(description="Token Issuance Worker (asyncio)")
 parser.add_argument('--token-queue-host', type=str, default='token-queue')
 parser.add_argument('--token-queue-port', type=int, default=6379)
 parser.add_argument('--proof-queue-host', type=str, default='proof-queue')
@@ -29,6 +30,8 @@ parser.add_argument('--app-urls', type=str, required=True,
                     help='Comma-separated list of 5 app /ingest URLs (index 0..4 = domain 0..4)')
 parser.add_argument('--token-ttl', type=int, default=3600)
 parser.add_argument('--http-timeout', type=float, default=5.0)
+parser.add_argument('--concurrency', type=int, default=64,
+                    help='Number of in-flight jobs per replica (also the HTTP connection-pool size)')
 args = parser.parse_args()
 
 APP_URLS = [u.strip() for u in args.app_urls.split(',')]
@@ -36,10 +39,6 @@ if len(APP_URLS) != 5:
     print(f"[ERROR] --app-urls must contain exactly 5 comma-separated URLs (got {len(APP_URLS)})")
     raise SystemExit(1)
 
-rTokenQueue = redis.Redis(host=args.token_queue_host, port=args.token_queue_port, db=0, decode_responses=True)
-rProofQueue = redis.Redis(host=args.proof_queue_host, port=args.proof_queue_port, db=0, decode_responses=True)
-
-# pyjwt accepts raw PEM bytes directly — no manual key parsing needed.
 try:
     with open(args.private_key_path, 'rb') as f:
         _private_key_pem = f.read()
@@ -62,64 +61,85 @@ def create_jwt(pseudo_id, domain_id, session_nullifier, ttl):
     return jwt.encode(payload, _private_key_pem, algorithm="RS256")
 
 
-print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Token Issuance Worker started. "
-      f"Consuming verified_queue @ {args.token_queue_host}:{args.token_queue_port}. "
-      f"Apps: {APP_URLS}")
+_job_count = 0
+_job_count_lock = asyncio.Lock()
 
-job_count = 0
 
-while True:
-    try:
-        item = rTokenQueue.brpop("verified_queue", timeout=0)
-        if not item:
-            continue
-
-        _, raw = item
-        entry = json.loads(raw)
-        job_id = entry.get("job_id")
-        public_inputs = entry.get("public_inputs", [])
-
-        if not job_id or not public_inputs:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [WARN] Malformed entry, skipping: {entry}")
-            continue
-
-        # Look up domain_id from side-table (set by request-handler at submit)
-        domain_raw = rProofQueue.get(f"domain:{job_id}")
+async def worker(worker_id, r_token, r_proof, http_client):
+    global _job_count
+    while True:
         try:
-            domain_id = int(domain_raw) if domain_raw is not None else 0
-        except (TypeError, ValueError):
-            domain_id = 0
-        if domain_id < 0 or domain_id > 4:
-            domain_id = 0
+            item = await r_token.brpop("verified_queue", timeout=0)
+            if not item:
+                continue
+            _, raw = item
+            entry = json.loads(raw)
+            job_id = entry.get("job_id")
+            public_inputs = entry.get("public_inputs", [])
 
-        pseudo_id = str(public_inputs[0])
-        jwt_token = create_jwt(
-            pseudo_id=pseudo_id,
-            domain_id=domain_id,
-            session_nullifier=job_id,
-            ttl=args.token_ttl,
-        )
+            if not job_id or not public_inputs:
+                print(f"[{time.strftime('%H:%M:%S')}] [WARN] worker {worker_id}: malformed entry {entry}")
+                continue
 
-        app_url = APP_URLS[domain_id]
+            domain_raw = await r_proof.get(f"domain:{job_id}")
+            try:
+                domain_id = int(domain_raw) if domain_raw is not None else 0
+            except (TypeError, ValueError):
+                domain_id = 0
+            if domain_id < 0 or domain_id > 4:
+                domain_id = 0
 
-        try:
-            resp = requests.post(
-                app_url,
-                json={"job_id": job_id, "token": jwt_token},
-                timeout=args.http_timeout,
-            )
-            if resp.status_code == 200:
-                job_count += 1
-                if job_count % 100 == 0:
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Delivered {job_count} tokens to apps")
-            else:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [WARN] domain {domain_id} returned {resp.status_code} for job {job_id}")
-                rProofQueue.set(f"status:{job_id}", "failed", ex=3600)
-        except Exception as http_err:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [WARN] HTTP error to domain {domain_id} for job {job_id}: {http_err}")
-            rProofQueue.set(f"status:{job_id}", "failed", ex=3600)
+            pseudo_id = str(public_inputs[0])
+            token = create_jwt(pseudo_id, domain_id, job_id, args.token_ttl)
+            app_url = APP_URLS[domain_id]
 
-    except Exception as e:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [ERROR] {e}")
-        import traceback; traceback.print_exc()
-        time.sleep(1)
+            try:
+                resp = await http_client.post(
+                    app_url,
+                    json={"job_id": job_id, "token": token},
+                )
+                if resp.status_code == 200:
+                    async with _job_count_lock:
+                        _job_count += 1
+                        if _job_count % 500 == 0:
+                            print(f"[{time.strftime('%H:%M:%S')}] Delivered {_job_count} tokens")
+                else:
+                    print(f"[{time.strftime('%H:%M:%S')}] [WARN] domain {domain_id} returned {resp.status_code} for job {job_id}")
+                    await r_proof.set(f"status:{job_id}", "failed", ex=3600)
+            except Exception as http_err:
+                print(f"[{time.strftime('%H:%M:%S')}] [WARN] HTTP error to domain {domain_id} for job {job_id}: {http_err}")
+                await r_proof.set(f"status:{job_id}", "failed", ex=3600)
+
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] [ERROR] worker {worker_id}: {e}")
+            await asyncio.sleep(1)
+
+
+async def main():
+    r_token = redis.Redis(
+        host=args.token_queue_host, port=args.token_queue_port, db=0, decode_responses=True
+    )
+    r_proof = redis.Redis(
+        host=args.proof_queue_host, port=args.proof_queue_port, db=0, decode_responses=True
+    )
+
+    limits = httpx.Limits(
+        max_connections=args.concurrency,
+        max_keepalive_connections=args.concurrency,
+        keepalive_expiry=60.0,
+    )
+    timeout = httpx.Timeout(args.http_timeout)
+    async with httpx.AsyncClient(limits=limits, timeout=timeout) as http_client:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Token Issuance Worker started "
+              f"(concurrency={args.concurrency}). "
+              f"Consuming verified_queue @ {args.token_queue_host}:{args.token_queue_port}. "
+              f"Apps: {APP_URLS}")
+        workers = [
+            asyncio.create_task(worker(i, r_token, r_proof, http_client))
+            for i in range(args.concurrency)
+        ]
+        await asyncio.gather(*workers)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -5,10 +5,11 @@ WORKDIR /app
 COPY TokenIssuanceModule.py .
 
 # pyjwt[crypto] pulls in `cryptography` which handles RS256 natively.
-# No gcc needed — pre-built manylinux wheels are available for linux/amd64.
+# httpx provides an async HTTP client with built-in connection pooling.
+# redis>=5 ships redis.asyncio out of the box.
 RUN pip install --no-cache-dir \
     redis==5.0.4 \
     pyjwt[crypto]==2.8.0 \
-    requests==2.31.0
+    httpx==0.27.0
 
 ENTRYPOINT ["python", "TokenIssuanceModule.py"]
