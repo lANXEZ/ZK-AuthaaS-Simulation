@@ -121,7 +121,15 @@ All 5 are identical in configuration. The `DOMAIN_ID` (0–4) is set at runtime 
 - [ ] Storage: **20 GiB gp3**
 - [ ] Record **Public IPv4** (for SSH/`scp`) and **Private IPv4** (token-issuer routes to this IP)
 
-> **Tip — launch all 5 app instances in one go:** on the Launch Instance page set **Number of instances** to 5, then rename each one from the EC2 console after launch (`zk-authaas-app-0` through `zk-authaas-app-4`).
+> **Tip — launch all 5 app instances in one go:** on the Launch Instance page set **Number of instances** to 5, then rename each one from the EC2 console after launch.
+>
+> **How to rename after launch (Instances list view):**
+> 1. Go to **EC2 → Instances** — the 5 new instances will all share the same name (or be unnamed)
+> 2. Hover over the **Name cell** of the first instance — a **pencil icon ✏️** appears to the right
+> 3. Click the pencil → type `zk-authaas-app-0` → press **Enter** or click the **✓** checkmark
+> 4. Repeat for the remaining four, naming them `zk-authaas-app-1` through `zk-authaas-app-4`
+>
+> You do not need to open the instance detail page — the rename is done entirely from the list view.
 
 ---
 
@@ -190,13 +198,14 @@ mkdir -p ~/zk-authaas
 ```
 
 Transfer files from your local machine (one `scp` per app, or scripted):
-```bash
-# Local machine — run once per app (replace N and IP)
-scp -i zk-authaas-key.pem \
-    zk-authaas-public.pem \
-    TokenValidatorService.py \
-    Dockerfile.token-validator \
-    docker-compose.app.yml \
+```powershell
+# Run from your local machine — once per app (replace N and the IP)
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" `
+    zk-authaas-public.pem `
+    TokenValidatorService.py `
+    Dockerfile.token-validator `
+    docker-compose.app.yml `
     ubuntu@<appN-public-ip>:~/zk-authaas/
 ```
 
@@ -223,6 +232,7 @@ curl http://localhost:9000/health
 
 ## Step 3 — Manager EC2 Setup
 
+**On the manager EC2:**
 ```bash
 ssh -i zk-authaas-key.pem ubuntu@<manager-public-ip>
 
@@ -231,16 +241,20 @@ sudo apt update && sudo apt install -y docker.io
 sudo systemctl enable --now docker
 sudo usermod -aG docker ubuntu
 exit
+```
 
-# Re-SSH so the docker group membership takes effect
+**On your local machine — transfer the project files:**
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
+scp -r -i "zk-authaas-key.pem" . ubuntu@<manager-public-ip>:~/zk-authaas/
+# Copies everything including zk-authaas-key.pem (excluded from git but needed on the manager).
+# If .venv exists and is large, delete it on the manager afterwards:
+#   ssh ubuntu@<manager-public-ip> "rm -rf ~/zk-authaas/.venv"
+```
+
+**Re-SSH and initialise the Swarm:**
+```bash
 ssh -i zk-authaas-key.pem ubuntu@<manager-public-ip>
-
-# Transfer project files (run locally):
-rsync -av -e "ssh -i zk-authaas-key.pem" \
-    --exclude '.venv' --exclude '.git' \
-    "E:/Work/VSCode Repo/ZK-AuthaaS Simulation/" \
-    ubuntu@<manager-public-ip>:~/zk-authaas/
-# zk-authaas-key.pem is included in the rsync (it's excluded from git only)
 
 # Init Swarm
 cd ~/zk-authaas
@@ -276,6 +290,7 @@ docker swarm join --token <SWARM_JOIN_TOKEN> $MANAGER_IP:2377
 
 ## Step 5 — k6 EC2 Setup
 
+**On the k6 EC2:**
 ```bash
 ssh -i zk-authaas-key.pem ubuntu@<k6-public-ip>
 
@@ -285,9 +300,12 @@ curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-
 echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
   | sudo tee /etc/apt/sources.list.d/k6.list
 sudo apt update && sudo apt install -y k6
+```
 
-# Transfer load_test.js (run locally):
-scp -i zk-authaas-key.pem load_test.js ubuntu@<k6-public-ip>:~/
+**On your local machine — transfer the load test script:**
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" load_test.js ubuntu@<k6-public-ip>:~/
 ```
 
 ---
@@ -399,16 +417,6 @@ ulimit -n 65536
 
 Transfer scripts from your **local machine**:
 
-**Git Bash:**
-```bash
-cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" \
-  load_test.js \
-  sweep_throughput.py \
-  ubuntu@<k6-public-ip>:~/
-```
-
-**PowerShell:**
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" `
@@ -492,14 +500,6 @@ python3 sweep_throughput.py \
 
 Copy results back and plot:
 
-**Git Bash:**
-```bash
-cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_e2e_baseline.csv .
-python visualize_sweep.py --input sweep_e2e_baseline.csv --output sweep_e2e_baseline_graph.png
-```
-
-**PowerShell:**
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_e2e_baseline.csv .
@@ -518,16 +518,6 @@ This is the main characterisation run. The test rotates the "hot" domain every 2
 
 Make sure the k6 EC2 has the latest `load_test.js` and `visualize_k6_per_app.py` before running.
 
-**Git Bash:**
-```bash
-cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" \
-  load_test.js \
-  visualize_k6_per_app.py \
-  ubuntu@<k6-public-ip>:~/
-```
-
-**PowerShell:**
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" `
@@ -569,28 +559,14 @@ k6 prints a live summary every 10 s. Watch `e2e_latency{domain:N}` values shift 
 
 ### 13c — Copy results back and visualize
 
-**Git Bash:**
-```bash
-cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results_e2e.csv .
 
 # Single overlaid latency graph — all 5 domains, focus-switch markers at 20/40/60/80 s
 python visualize_k6_per_app.py
 # → latency_graph.png
 
-# Optional: widen the smoothing window if the lines look noisy
-python visualize_k6_per_app.py --bucket 3
-
-# Optional: clean graph without the phase markers
-python visualize_k6_per_app.py --no-markers
-```
-
-**PowerShell:**
-```powershell
-cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results_e2e.csv .
-
-python visualize_k6_per_app.py
 python visualize_k6_per_app.py --bucket 3       # optional — smoother lines
 python visualize_k6_per_app.py --no-markers     # optional — no phase lines
 ```
