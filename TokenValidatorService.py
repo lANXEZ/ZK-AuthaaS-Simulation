@@ -1,17 +1,13 @@
 import argparse
 import asyncio
-import base64
-import json
 import time
 from contextlib import asynccontextmanager
 
+import jwt
 import redis
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from Crypto.Signature import pkcs1_v1_5
-from Crypto.Hash import SHA256
-from Crypto.PublicKey import RSA
 
 # App-side token validator service.
 #
@@ -20,7 +16,7 @@ from Crypto.PublicKey import RSA
 #     └─ enqueue immediately → return 200 (fast, no blocking)
 #
 #   Background validation workers (asyncio tasks, --workers N)
-#     └─ dequeue → validate (signature + expiration + domainID)
+#     └─ dequeue → validate (RS256 signature + expiration + domainID)
 #     └─ write status:{job_id} = "completed" | "failed"
 #        to proof-queue Redis on the main Swarm manager
 #
@@ -28,21 +24,22 @@ from Crypto.PublicKey import RSA
 
 parser = argparse.ArgumentParser(description="Token Validator Service")
 parser.add_argument('--public-key-path', type=str, default='/etc/zk-authaas/zk-authaas-public.pem')
-parser.add_argument('--expected-domain-id', type=str, default='1')
+parser.add_argument('--expected-domain-id', type=int, default=0,
+                    help='Domain ID this app owns (0..4). Tokens with a different domainID are rejected.')
 parser.add_argument('--proof-queue-host', type=str, required=True,
-                    help='Manager proof-queue Redis host (for writing status write-back)')
+                    help='Manager proof-queue Redis host (for status write-back)')
 parser.add_argument('--proof-queue-port', type=int, default=6379)
 parser.add_argument('--workers', type=int, default=4,
                     help='Number of parallel validation worker coroutines')
 parser.add_argument('--port', type=int, default=9000)
 args, _ = parser.parse_known_args()
 
-# Load RSA public key once at startup
+# Load RSA public key PEM bytes once at startup.
+# pyjwt accepts raw PEM bytes directly — no manual key parsing needed.
 try:
     with open(args.public_key_path, 'rb') as f:
-        _public_key = RSA.import_key(f.read())
-    _verifier = pkcs1_v1_5.new(_public_key)
-    print(f"RSA public key loaded ({_public_key.size_in_bits()} bits) from {args.public_key_path}")
+        _public_key_pem = f.read()
+    print(f"RSA public key loaded from {args.public_key_path}")
 except Exception as e:
     print(f"[ERROR] Failed to load public key: {e}")
     raise SystemExit(1)
@@ -63,48 +60,25 @@ except Exception as e:
 # Validation logic (sync — called inside asyncio.to_thread)
 # ------------------------------------------------------------------
 
-def _b64url_decode(s: str) -> bytes:
-    s = s.encode('utf-8') if isinstance(s, str) else s
-    pad = 4 - (len(s) % 4)
-    if pad != 4:
-        s += b'=' * pad
-    return base64.urlsafe_b64decode(s)
-
-
 def _validate_sync(token: str):
     """Returns (ok: bool, reason: str). Runs in a thread pool worker."""
-    parts = token.split('.')
-    if len(parts) != 3:
-        return False, "Malformed JWT"
-
-    header_b64, payload_b64, sig_b64 = parts
-
+    # jwt.decode validates signature AND expiration in one call.
+    # Raises specific exceptions on each failure type.
     try:
-        header = json.loads(_b64url_decode(header_b64))
-        payload = json.loads(_b64url_decode(payload_b64))
-        sig = _b64url_decode(sig_b64)
-    except Exception:
-        return False, "JWT decode error"
-
-    if header.get("alg") != "RS256":
-        return False, f"Unsupported algorithm: {header.get('alg')}"
-
-    message = f"{header_b64}.{payload_b64}".encode('utf-8')
-    try:
-        valid = _verifier.verify(SHA256.new(message), sig)
-        if not valid:
-            return False, "Signature invalid"
-    except Exception:
-        return False, "Signature verification failed"
-
-    exp = payload.get("exp")
-    if exp is None:
-        return False, "Missing exp claim"
-    if int(time.time()) >= exp:
+        payload = jwt.decode(token, _public_key_pem, algorithms=["RS256"])
+    except jwt.ExpiredSignatureError:
         return False, "Token expired"
+    except jwt.InvalidTokenError as e:
+        return False, f"Invalid token: {e}"
 
-    if payload.get("domainID") != args.expected_domain_id:
-        return False, f"domainID mismatch (got {payload.get('domainID')!r})"
+    # domainID is encoded as int in the JWT payload — compare as int.
+    if "domainID" not in payload:
+        return False, "Missing domainID claim"
+    if int(payload["domainID"]) != args.expected_domain_id:
+        return False, (
+            f"domainID mismatch (got {payload['domainID']!r}, "
+            f"expected {args.expected_domain_id})"
+        )
 
     return True, "Valid"
 
@@ -128,7 +102,7 @@ async def _validation_worker():
             ok, reason = await asyncio.to_thread(_validate_sync, token)
             status = "completed" if ok else "failed"
             if not ok:
-                print(f"[{time.strftime('%H:%M:%S')}] Validation failed job {job_id}: {reason}")
+                print(f"[{time.strftime('%H:%M:%S')}] Validation FAILED job {job_id}: {reason}")
             await asyncio.to_thread(_write_status, job_id, status)
         except Exception as e:
             print(f"[{time.strftime('%H:%M:%S')}] [ERROR] Worker exception for job {job_id}: {e}")
@@ -145,8 +119,10 @@ async def lifespan(app: FastAPI):
     global _ingest_queue
     _ingest_queue = asyncio.Queue()
     workers = [asyncio.create_task(_validation_worker()) for _ in range(args.workers)]
-    print(f"[{time.strftime('%H:%M:%S')}] {args.workers} validation workers started. "
-          f"Listening on port {args.port}.")
+    print(
+        f"[{time.strftime('%H:%M:%S')}] {args.workers} validation workers started. "
+        f"domainID={args.expected_domain_id}. Listening on port {args.port}."
+    )
     yield
     for w in workers:
         w.cancel()

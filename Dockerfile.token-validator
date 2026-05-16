@@ -2,17 +2,21 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
-
 COPY TokenValidatorService.py .
 
-RUN pip install --no-cache-dir fastapi==0.110.0 uvicorn==0.29.0 pycryptodome==3.23.0
+# pyjwt[crypto] pulls in the `cryptography` package which handles RS256 natively.
+# No gcc needed — pre-built manylinux wheels are available for linux/amd64.
+RUN pip install --no-cache-dir \
+    fastapi==0.110.0 \
+    uvicorn==0.29.0 \
+    pyjwt[crypto]==2.8.0 \
+    redis==5.0.4
 
 EXPOSE 9000
 
 ENTRYPOINT ["python", "TokenValidatorService.py"]
 CMD [ \
   "--public-key-path", "/etc/zk-authaas/zk-authaas-public.pem", \
-  "--expected-domain-id", "1", \
+  "--expected-domain-id", "0", \
   "--port", "9000" \
 ]

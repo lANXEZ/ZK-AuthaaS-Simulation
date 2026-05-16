@@ -186,7 +186,7 @@ All apps share the same `docker-compose.app.yml` — only `DOMAIN_ID` differs.
 # SSH into App N's EC2
 ssh -i zk-authaas-ec2-key.pem ubuntu@<appN-public-ip>
 
-# Install Docker
+# Install Docker engine
 sudo apt update && sudo apt install -y docker.io
 sudo systemctl enable --now docker
 sudo usermod -aG docker ubuntu
@@ -194,6 +194,14 @@ exit
 
 # Re-SSH so the docker group membership takes effect
 ssh -i zk-authaas-ec2-key.pem ubuntu@<appN-public-ip>
+
+# Install Docker Compose V2 plugin (docker.io does NOT include it)
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+sudo curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+docker compose version   # must print: Docker Compose version v2.27.0
+
 mkdir -p ~/zk-authaas
 ```
 
@@ -225,7 +233,7 @@ curl http://localhost:9000/health
 # Expected: {"status":"ok","queue_size":0,"workers":4}
 ```
 
-> **Sanity check:** SSH into app-2, run `docker compose logs token-validator | head -5` and confirm
+> **Sanity check:** SSH into app-2, run `docker compose -f docker-compose.app.yml logs token-validator | head -5` and confirm
 > the startup line shows it loaded the public key and is bound to `domainID=2`.
 
 ---
@@ -236,10 +244,21 @@ curl http://localhost:9000/health
 ```bash
 ssh -i zk-authaas-ec2-key.pem ubuntu@<manager-public-ip>
 
-# Install Docker
+# Install Docker engine
 sudo apt update && sudo apt install -y docker.io
 sudo systemctl enable --now docker
 sudo usermod -aG docker ubuntu
+exit
+
+# Re-SSH so the docker group membership takes effect
+ssh -i zk-authaas-ec2-key.pem ubuntu@<manager-public-ip>
+
+# Install Docker Compose V2 plugin (docker.io does NOT include it)
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+sudo curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+docker compose version   # must print: Docker Compose version v2.27.0
 exit
 ```
 
@@ -269,7 +288,7 @@ docker swarm init --advertise-addr $MANAGER_IP
 ```bash
 ssh -i zk-authaas-ec2-key.pem ubuntu@<worker-public-ip>
 
-# Install Docker
+# Install Docker engine
 sudo apt update && sudo apt install -y docker.io
 sudo systemctl enable --now docker
 sudo usermod -aG docker ubuntu
@@ -277,6 +296,13 @@ exit
 
 # Re-SSH so the docker group membership takes effect
 ssh -i zk-authaas-ec2-key.pem ubuntu@<worker-public-ip>
+
+# Install Docker Compose V2 plugin (docker.io does NOT include it)
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+sudo curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+docker compose version   # must print: Docker Compose version v2.27.0
 
 # Increase inotify watches for snarkjs file watching
 sudo sysctl -w fs.inotify.max_user_watches=524288

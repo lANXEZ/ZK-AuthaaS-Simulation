@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Standalone compose for each App EC2 (does NOT join the Swarm).
 # Used for all 5 apps — only DOMAIN_ID differs per instance.
 #
