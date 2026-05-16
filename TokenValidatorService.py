@@ -44,16 +44,19 @@ except Exception as e:
     print(f"[ERROR] Failed to load public key: {e}")
     raise SystemExit(1)
 
-# Redis connection to main system's proof-queue (for status write-back)
+# Redis connection to main system's proof-queue (for status write-back).
+# The Redis client is lazy — it does not actually connect until the first command.
+# A ping at startup is attempted only as a connectivity check; failure is non-fatal
+# so the service can start before the manager's stack is deployed.
+rProofQueue = redis.Redis(
+    host=args.proof_queue_host, port=args.proof_queue_port, db=0, decode_responses=True
+)
 try:
-    rProofQueue = redis.Redis(
-        host=args.proof_queue_host, port=args.proof_queue_port, db=0, decode_responses=True
-    )
     rProofQueue.ping()
     print(f"Connected to proof-queue Redis @ {args.proof_queue_host}:{args.proof_queue_port}")
 except Exception as e:
-    print(f"[ERROR] Cannot reach proof-queue Redis: {e}")
-    raise SystemExit(1)
+    print(f"[WARN] proof-queue Redis not reachable yet ({e})")
+    print("[WARN] Service starting anyway — workers will connect once Redis is up.")
 
 
 # ------------------------------------------------------------------

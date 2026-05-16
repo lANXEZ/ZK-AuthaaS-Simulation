@@ -230,11 +230,31 @@ docker compose -f docker-compose.app.yml up -d
 
 # Verify
 curl http://localhost:9000/health
-# Expected: {"status":"ok","queue_size":0,"workers":4}
+# Expected:
+# {"status":"ok","queue_size":0,"workers":4}
 ```
 
-> **Sanity check:** SSH into app-2, run `docker compose -f docker-compose.app.yml logs token-validator | head -5` and confirm
-> the startup line shows it loaded the public key and is bound to `domainID=2`.
+> **What to expect from logs at this stage:**
+>
+> The service starts regardless of whether the manager's Redis is up yet.
+> Run `docker compose -f docker-compose.app.yml logs token-validator | head -5` and you will see one of two startup sequences:
+>
+> *If the manager's stack is already deployed (Redis is up):*
+> ```
+> RSA public key loaded from /etc/zk-authaas/zk-authaas-public.pem
+> Connected to proof-queue Redis @ <MANAGER_IP>:6379
+> [HH:MM:SS] 4 validation workers started. domainID=N. Listening on port 9000.
+> ```
+>
+> *If the manager's stack is not yet deployed (Redis not up — normal at this stage):*
+> ```
+> RSA public key loaded from /etc/zk-authaas/zk-authaas-public.pem
+> [WARN] proof-queue Redis not reachable yet (...)
+> [WARN] Service starting anyway — workers will connect once Redis is up.
+> [HH:MM:SS] 4 validation workers started. domainID=N. Listening on port 9000.
+> ```
+>
+> In both cases `curl http://localhost:9000/health` must return `{"status":"ok","queue_size":0,"workers":4}`. Once the manager's stack is deployed the workers will connect to Redis automatically on their first write — no restart needed.
 
 ---
 
