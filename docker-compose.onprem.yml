@@ -1,0 +1,227 @@
+# Per-domain on-prem stack.
+# Run ONE copy of this compose on EACH of the 5 domain EC2s.
+# All 5 EC2s run an identical stack — there is no centralised service.
+#
+# Usage on each domain EC2:
+#   cd ~/zk-authaas
+#   docker compose -f docker-compose.onprem.yml build
+#   docker compose -f docker-compose.onprem.yml up -d
+#
+# k6 talks to each domain's request-handler directly on port 8000.
+
+services:
+
+  # ------------------------------------------
+  # Local Redis brokers (no token-queue — on-prem skips token issuance)
+  # ------------------------------------------
+  proof-queue:
+    image: redis:latest
+    networks: [onprem-net]
+
+  snark-queue:
+    image: redis:latest
+    networks: [onprem-net]
+
+  # ------------------------------------------
+  # Request handler — k6's entry point for this domain
+  # ------------------------------------------
+  request-handler:
+    build:
+      context: .
+      dockerfile: Dockerfile.requesthandler
+    image: zk-authaas/request-handler:latest
+    depends_on: [proof-queue]
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "python"
+      - "requestHandler.py"
+      - "--redis-host"
+      - "proof-queue"
+      - "--redis-port"
+      - "6379"
+    ports:
+      - "8000:8000"
+    networks: [onprem-net]
+
+  # ------------------------------------------
+  # Verifier selector — round-robin across the 8 SNARK verifiers in THIS domain
+  # ------------------------------------------
+  verifier-selector:
+    build:
+      context: .
+      dockerfile: Dockerfile.selector
+    image: zk-authaas/verifier-selector:latest
+    depends_on: [proof-queue, snark-queue]
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "python"
+      - "verifierSelector.py"
+      - "--proof-host"
+      - "proof-queue"
+      - "--proof-port"
+      - "6379"
+      - "--snark-host"
+      - "snark-queue"
+      - "--snark-port"
+      - "6379"
+      - "--stark-host"
+      - "snark-queue"   # unused but required; point at any reachable Redis
+      - "--stark-port"
+      - "6379"
+      - "--snark-count"
+      - "8"
+      - "--stark-count"
+      - "0"
+      - "--routing"
+      - "roundrobin"
+      - "--snark-cost-weight"
+      - "1.0"
+      - "--stark-cost-weight"
+      - "1.0"
+    networks: [onprem-net]
+
+  # ------------------------------------------
+  # 8 SNARK verifiers — index baked in via TASK_SLOT env var
+  # In service mode the worker reads TASK_SLOT from Swarm; here we set it
+  # explicitly per replica via 8 distinct service blocks.
+  # On --mode onprem the worker writes status=completed directly to proof-queue
+  # (no token-queue push), so verification IS the completion event.
+  # ------------------------------------------
+  snark-verifier-0: &snark-base
+    build:
+      context: .
+      dockerfile: Dockerfile.snark
+    image: zk-authaas/snark-verifier:latest
+    depends_on: [snark-queue, proof-queue]
+    environment:
+      - TASK_SLOT=1
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "0"
+    networks: [onprem-net]
+
+  snark-verifier-1:
+    <<: *snark-base
+    environment:
+      - TASK_SLOT=2
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "1"
+
+  snark-verifier-2:
+    <<: *snark-base
+    environment:
+      - TASK_SLOT=3
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "2"
+
+  snark-verifier-3:
+    <<: *snark-base
+    environment:
+      - TASK_SLOT=4
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "3"
+
+  snark-verifier-4:
+    <<: *snark-base
+    environment:
+      - TASK_SLOT=5
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "4"
+
+  snark-verifier-5:
+    <<: *snark-base
+    environment:
+      - TASK_SLOT=6
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "5"
+
+  snark-verifier-6:
+    <<: *snark-base
+    environment:
+      - TASK_SLOT=7
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "6"
+
+  snark-verifier-7:
+    <<: *snark-base
+    environment:
+      - TASK_SLOT=8
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "7"
+
+networks:
+  onprem-net:
+    driver: bridge

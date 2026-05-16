@@ -596,13 +596,14 @@ ulimit -n 65536
 k6 run \
   -e TARGET=<manager-private-ip> \
   -e VUS=<KNEE_VU> \
-  -e DURATION=120s \
+  -e DURATION=100s \
   load_test.js \
   --out csv=test_results_e2e.csv
 ```
 
-> **DURATION sizing:** all 5 phase windows are 20 s each = 100 s total. Use **120 s** so
-> the last phase has a clean trailing window before the test stops.
+> **DURATION sizing:** all 5 phase windows are 20 s each = **100 s total**. Anything beyond
+> 100 s just keeps domain 4 hot (the last phase's weights are sticky), which adds points to
+> the graph without showing anything new.
 >
 > The older `ITERATIONS=…` form (shared-iterations executor) still works — it's what
 > `sweep_throughput.py` uses internally. Use DURATION for time-bounded characterisation

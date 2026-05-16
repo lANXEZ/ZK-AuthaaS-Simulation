@@ -27,6 +27,8 @@ function parseArgs() {
         tokenQueueHost:  'token-queue',
         tokenQueuePort:  6379,
         index:           null,
+        mode:            'service',   // 'service' (push to verified_queue for token-issuer)
+                                       // 'onprem'  (set status=completed directly, no token pipeline)
     };
     for (let i = 0; i < args.length; i++) {
         if      (args[i] === '--redis-host')        opts.redisHost       = args[++i];
@@ -36,6 +38,11 @@ function parseArgs() {
         else if (args[i] === '--token-queue-host')  opts.tokenQueueHost  = args[++i];
         else if (args[i] === '--token-queue-port')  opts.tokenQueuePort  = parseInt(args[++i]);
         else if (args[i] === '--index')             opts.index           = parseInt(args[++i]);
+        else if (args[i] === '--mode')              opts.mode            = args[++i];
+    }
+    if (opts.mode !== 'service' && opts.mode !== 'onprem') {
+        console.error(`Invalid --mode: ${opts.mode} (must be 'service' or 'onprem')`);
+        process.exit(1);
     }
     return opts;
 }
@@ -62,7 +69,10 @@ const vKey = JSON.parse(fs.readFileSync(path.join(__dirname, "verification_key.j
 
 const rSnarkQueue  = new Redis({ host: opts.redisHost,      port: opts.redisPort });
 const rProofQueue  = new Redis({ host: opts.proofQueueHost, port: opts.proofQueuePort });
-const rTokenQueue  = new Redis({ host: opts.tokenQueueHost, port: opts.tokenQueuePort });
+// token-queue only exists in service mode; on-prem skips token issuance entirely.
+const rTokenQueue  = opts.mode === 'service'
+    ? new Redis({ host: opts.tokenQueueHost, port: opts.tokenQueuePort })
+    : null;
 
 function ts() {
     return new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -92,17 +102,22 @@ async function run() {
             const success = await snarkjs.groth16.verify(vKey, publicSignals, proof);
 
             if (success) {
-                // Verification passed — enqueue to token-queue for the token-creation module.
-                // Status is intentionally left as "processing"; the token module sets "completed"
-                // once a token has been issued, at which point k6's poll will resolve.
-                const verifiedEntry = JSON.stringify({
-                    job_id:        jobId,
-                    scheme:        "snark",
-                    public_inputs: publicSignals,
-                    verified_at:   Date.now() / 1000,   // Unix timestamp (seconds, float)
-                });
-                await rTokenQueue.lpush("verified_queue", verifiedEntry);
-                console.log(`[${ts()}] SNARK idx=${myIndex} verified OK. Job ${jobId} -> enqueued to verified_queue`);
+                if (opts.mode === 'onprem') {
+                    // On-prem: no token pipeline. Verification success IS the completion event,
+                    // so flip status to "completed" directly and k6's poll will resolve.
+                    await rProofQueue.set(`status:${jobId}`, "completed", "EX", 3600);
+                } else {
+                    // Service mode: verification passed — enqueue to token-queue for the
+                    // token-creation module. Status is intentionally left as "processing";
+                    // the token module sets "completed" once a token has been issued.
+                    const verifiedEntry = JSON.stringify({
+                        job_id:        jobId,
+                        scheme:        "snark",
+                        public_inputs: publicSignals,
+                        verified_at:   Date.now() / 1000,   // Unix timestamp (seconds, float)
+                    });
+                    await rTokenQueue.lpush("verified_queue", verifiedEntry);
+                }
             } else {
                 // Verification failed — immediately mark so k6 can stop polling.
                 if (jobId) {

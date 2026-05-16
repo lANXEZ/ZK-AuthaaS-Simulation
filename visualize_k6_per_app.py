@@ -168,7 +168,7 @@ def plot_latency(
             if t_switch <= t_max:
                 ax.axvline(t_switch, color="black", linestyle="--", linewidth=0.8, alpha=0.5)
 
-        # Annotate focus regions at the top of the plot
+        # Annotate focus regions below the x-axis (under the tick labels)
         region_starts = [0] + FOCUS_SWITCH_TIMES
         for idx, t_start in enumerate(region_starts):
             t_end = FOCUS_SWITCH_TIMES[idx] if idx < len(FOCUS_SWITCH_TIMES) else t_max
@@ -178,9 +178,9 @@ def plot_latency(
             mid   = (t_start + t_end) / 2
             label = f"Dom {idx}\nhot"
             ax.text(
-                mid, 1.01, label,
+                mid, -0.12, label,
                 transform=ax.get_xaxis_transform(),
-                ha="center", va="bottom",
+                ha="center", va="top",
                 fontsize=8, color=DOMAIN_COLORS.get(str(idx), "gray"),
                 fontweight="bold",
             )
@@ -196,7 +196,7 @@ def plot_latency(
     ax.set_xlim(left=0)
 
     fig.tight_layout()
-    fig.savefig(output, dpi=150)
+    fig.savefig(output, dpi=150, bbox_inches="tight")
     print(f"Saved {output}")
 
 
