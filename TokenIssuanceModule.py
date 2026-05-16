@@ -6,6 +6,7 @@ import time
 import httpx
 import jwt
 import redis.asyncio as redis
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 # Reads verified jobs from token-queue Redis (verified_queue), signs a RS256 JWT,
 # and POSTs {job_id, token} to the target app's /ingest endpoint.
@@ -42,6 +43,11 @@ if len(APP_URLS) != 5:
 try:
     with open(args.private_key_path, 'rb') as f:
         _private_key_pem = f.read()
+    # Pre-parse the PEM into a cryptography private key once at startup.
+    # pyjwt.encode() re-parses PEM bytes on every call (~100 ms on RSA-2048),
+    # which blocks the asyncio event loop and tanks throughput. Passing a
+    # cryptography key object skips the re-parse → signing drops to ~2 ms.
+    _private_key = load_pem_private_key(_private_key_pem, password=None)
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] RSA private key loaded from {args.private_key_path}")
 except Exception as e:
     print(f"[ERROR] Failed to load private key: {e}")
@@ -58,7 +64,7 @@ def create_jwt(pseudo_id, domain_id, session_nullifier, ttl):
         "iat": now,
         "exp": now + ttl,
     }
-    return jwt.encode(payload, _private_key_pem, algorithm="RS256")
+    return jwt.encode(payload, _private_key, algorithm="RS256")
 
 
 _job_count = 0
