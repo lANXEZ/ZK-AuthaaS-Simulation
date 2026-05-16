@@ -75,9 +75,7 @@ async def worker(worker_id, r_token, r_proof, http_client):
     global _job_count
     while True:
         try:
-            t_start = time.monotonic()
             item = await r_token.brpop("verified_queue", timeout=0)
-            t_brpop = time.monotonic()
             if not item:
                 continue
             _, raw = item
@@ -90,8 +88,6 @@ async def worker(worker_id, r_token, r_proof, http_client):
                 continue
 
             domain_raw = await r_proof.get(f"domain:{job_id}")
-            t_domain = time.monotonic()
-
             try:
                 domain_id = int(domain_raw) if domain_raw is not None else 0
             except (TypeError, ValueError):
@@ -101,7 +97,6 @@ async def worker(worker_id, r_token, r_proof, http_client):
 
             pseudo_id = str(public_inputs[0])
             token = create_jwt(pseudo_id, domain_id, job_id, args.token_ttl)
-            t_sign = time.monotonic()
             app_url = APP_URLS[domain_id]
 
             try:
@@ -109,21 +104,11 @@ async def worker(worker_id, r_token, r_proof, http_client):
                     app_url,
                     json={"job_id": job_id, "token": token},
                 )
-                t_post = time.monotonic()
                 if resp.status_code == 200:
                     async with _job_count_lock:
                         _job_count += 1
-                        # TEMP: log timing breakdown every 50th job
-                        if _job_count % 50 == 0:
-                            ms = lambda a, b: (b - a) * 1000
-                            print(
-                                f"[{time.strftime('%H:%M:%S')}] job#{_job_count} dom{domain_id} "
-                                f"brpop={ms(t_start, t_brpop):>6.1f}ms "
-                                f"get_dom={ms(t_brpop, t_domain):>5.1f}ms "
-                                f"sign={ms(t_domain, t_sign):>5.1f}ms "
-                                f"post={ms(t_sign, t_post):>7.1f}ms",
-                                flush=True,
-                            )
+                        if _job_count % 500 == 0:
+                            print(f"[{time.strftime('%H:%M:%S')}] Delivered {_job_count} tokens")
                 else:
                     print(f"[{time.strftime('%H:%M:%S')}] [WARN] domain {domain_id} returned {resp.status_code} for job {job_id}")
                     await r_proof.set(f"status:{job_id}", "failed", ex=3600)
