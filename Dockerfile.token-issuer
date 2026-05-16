@@ -2,20 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
-
 COPY TokenIssuanceModule.py .
 
-RUN pip install --no-cache-dir redis==5.0.0 pycryptodome==3.23.0 requests==2.31.0
+# pyjwt[crypto] pulls in `cryptography` which handles RS256 natively.
+# No gcc needed — pre-built manylinux wheels are available for linux/amd64.
+RUN pip install --no-cache-dir \
+    redis==5.0.4 \
+    pyjwt[crypto]==2.8.0 \
+    requests==2.31.0
 
 ENTRYPOINT ["python", "TokenIssuanceModule.py"]
-CMD [ \
-  "--token-queue-host", "token-queue", \
-  "--token-queue-port", "6379", \
-  "--proof-queue-host", "proof-queue", \
-  "--proof-queue-port", "6379", \
-  "--private-key-path", "/etc/zk-authaas/zk-authaas-key.pem", \
-  "--app-url", "http://localhost:9000/validate", \
-  "--domain-id", "1", \
-  "--token-ttl", "3600" \
-]

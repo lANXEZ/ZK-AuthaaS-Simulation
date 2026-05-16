@@ -202,23 +202,10 @@ sudo curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker
 sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 docker compose version   # must print: Docker Compose version v2.27.0
 
-mkdir -p ~/zk-authaas
-```
-
-Transfer files from your local machine (one `scp` per app, or scripted):
-```powershell
-# Run from your local machine — once per app (replace N and the IP)
-cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-ec2-key.pem" `
-    zk-authaas-public.pem `
-    TokenValidatorService.py `
-    Dockerfile.token-validator `
-    docker-compose.app.yml `
-    ubuntu@<appN-public-ip>:~/zk-authaas/
-```
-
-Then on each App EC2:
-```bash
+# Clone the project repo — all required files are tracked
+# (zk-authaas-public.pem, TokenValidatorService.py, Dockerfile.token-validator, docker-compose.app.yml).
+rm -rf ~/zk-authaas   # safety: wipe any stale dir from a previous attempt
+git clone https://github.com/lANXEZ/ZK-AuthaaS-Simulation.git ~/zk-authaas
 cd ~/zk-authaas
 
 # IMPORTANT: each app gets its own DOMAIN_ID (0..4 matching the EC2 number)
@@ -228,11 +215,24 @@ export PROOF_QUEUE_HOST=<MANAGER_IP>
 docker compose -f docker-compose.app.yml build
 docker compose -f docker-compose.app.yml up -d
 
+# Wait for uvicorn to finish binding to port 9000 before health-checking.
+# Without this sleep curl will hit "Recv failure: Connection reset by peer"
+# because the container has started but uvicorn isn't listening yet.
+sleep 3
+
+# Confirm the container is actually up (not restart-looping)
+docker ps -a | grep token-validator
+# STATUS column must show "Up X seconds", NOT "Restarting (1)"
+
 # Verify
 curl http://localhost:9000/health
 # Expected:
 # {"status":"ok","queue_size":0,"workers":4}
 ```
+
+> **If `curl` returns `Connection reset by peer`:** uvicorn hasn't finished startup yet — wait a couple more seconds and retry. The container takes ~2–3 s to start the validation workers and bind to port 9000 after `docker compose up -d` returns.
+>
+> **If `curl` returns `Connection refused`:** the container has crashed and exited — run `docker logs zk-authaas-token-validator-1` and check that the file on disk matches the latest version (`grep -c "WARN" TokenValidatorService.py` must print `2`; if it prints `0` the old crash-on-Redis-fail code is still on the EC2 and needs to be re-`scp`'d from your local machine).
 
 > **What to expect from logs at this stage:**
 >
@@ -279,21 +279,12 @@ sudo curl -SL https://github.com/docker/compose/releases/download/v2.27.0/docker
   -o /usr/local/lib/docker/cli-plugins/docker-compose
 sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 docker compose version   # must print: Docker Compose version v2.27.0
-exit
-```
 
-**On your local machine — transfer the project files:**
-```powershell
-cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -r -i "zk-authaas-ec2-key.pem" . ubuntu@<manager-public-ip>:~/zk-authaas/
-# Copies everything including zk-authaas-ec2-key.pem (excluded from git but needed on the manager).
-# If .venv exists and is large, delete it on the manager afterwards:
-#   ssh ubuntu@<manager-public-ip> "rm -rf ~/zk-authaas/.venv"
-```
-
-**Re-SSH and initialise the Swarm:**
-```bash
-ssh -i zk-authaas-ec2-key.pem ubuntu@<manager-public-ip>
+# Clone the project repo (zk-authaas-public.pem is tracked, so no scp is needed).
+# zk-authaas-ec2-key.pem is gitignored, but the manager does NOT need it —
+# Docker Swarm handles inter-node communication with its own TLS certs.
+rm -rf ~/zk-authaas   # safety: wipe any stale dir from a previous attempt
+git clone https://github.com/lANXEZ/ZK-AuthaaS-Simulation.git ~/zk-authaas
 
 # Init Swarm
 cd ~/zk-authaas
@@ -328,6 +319,10 @@ docker compose version   # must print: Docker Compose version v2.27.0
 sudo sysctl -w fs.inotify.max_user_watches=524288
 echo "fs.inotify.max_user_watches=524288" | sudo tee -a /etc/sysctl.conf
 
+# Clone the project repo — Step 7 builds the snark-verifier image from this directory
+rm -rf ~/zk-authaas   # safety: wipe any stale dir from a previous attempt
+git clone https://github.com/lANXEZ/ZK-AuthaaS-Simulation.git ~/zk-authaas
+
 # Join Swarm (use token from Step 3)
 docker swarm join --token <SWARM_JOIN_TOKEN> $MANAGER_IP:2377
 ```
@@ -346,12 +341,14 @@ curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-
 echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
   | sudo tee /etc/apt/sources.list.d/k6.list
 sudo apt update && sudo apt install -y k6
-```
 
-**On your local machine — transfer the load test script:**
-```powershell
-cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-ec2-key.pem" load_test.js ubuntu@<k6-public-ip>:~/
+# Clone the project repo — load_test.js, sweep_throughput.py, and visualize_k6_per_app.py are all tracked
+rm -rf ~/zk-authaas   # safety: wipe any stale dir from a previous attempt
+git clone https://github.com/lANXEZ/ZK-AuthaaS-Simulation.git ~/zk-authaas
+# Symlink the scripts to $HOME so the k6 commands later in the checklist work as-is
+ln -sf ~/zk-authaas/load_test.js ~/load_test.js
+ln -sf ~/zk-authaas/sweep_throughput.py ~/sweep_throughput.py
+ln -sf ~/zk-authaas/visualize_k6_per_app.py ~/visualize_k6_per_app.py
 ```
 
 ---
@@ -461,14 +458,10 @@ ssh -i zk-authaas-ec2-key.pem ubuntu@<k6-public-ip>
 ulimit -n 65536
 ```
 
-Transfer scripts from your **local machine**:
+Refresh the scripts from GitHub (the repo was cloned in Step 5):
 
-```powershell
-cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-ec2-key.pem" `
-  load_test.js `
-  sweep_throughput.py `
-  ubuntu@<k6-public-ip>:~/
+```bash
+cd ~/zk-authaas && git pull && cd ~
 ```
 
 > **Tip — use tmux so SSH disconnects don't kill a running sweep:**
@@ -560,16 +553,12 @@ python visualize_sweep.py --input sweep_e2e_baseline.csv --output sweep_e2e_base
 
 This is the main characterisation run. The test rotates the "hot" domain every 20 s (domain 0 → 1 → 2 → 3 → 4), giving each domain 60 % of traffic while it is focused and 10 % when it is not. Running at `KNEE_VU` keeps the system under meaningful load throughout the entire rotation.
 
-### 13a — Transfer the updated test files (local machine)
+### 13a — Refresh the test files from GitHub (on the k6 EC2)
 
 Make sure the k6 EC2 has the latest `load_test.js` and `visualize_k6_per_app.py` before running.
 
-```powershell
-cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-ec2-key.pem" `
-  load_test.js `
-  visualize_k6_per_app.py `
-  ubuntu@<k6-public-ip>:~/
+```bash
+cd ~/zk-authaas && git pull && cd ~
 ```
 
 ### 13b — Run the shifting-focus test

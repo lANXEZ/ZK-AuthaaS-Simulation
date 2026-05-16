@@ -2,11 +2,8 @@ import redis
 import json
 import time
 import argparse
-import base64
 import requests
-from Crypto.Signature import pkcs1_v1_5
-from Crypto.Hash import SHA256
-from Crypto.PublicKey import RSA
+import jwt
 
 # Reads verified jobs from token-queue Redis (verified_queue), signs a RS256 JWT,
 # and POSTs {job_id, token} to the target app's /ingest endpoint.
@@ -42,38 +39,27 @@ if len(APP_URLS) != 5:
 rTokenQueue = redis.Redis(host=args.token_queue_host, port=args.token_queue_port, db=0, decode_responses=True)
 rProofQueue = redis.Redis(host=args.proof_queue_host, port=args.proof_queue_port, db=0, decode_responses=True)
 
+# pyjwt accepts raw PEM bytes directly — no manual key parsing needed.
 try:
     with open(args.private_key_path, 'rb') as f:
-        private_key = RSA.import_key(f.read())
-    signer = pkcs1_v1_5.new(private_key)
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] RSA private key loaded ({private_key.size_in_bits()} bits)")
+        _private_key_pem = f.read()
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] RSA private key loaded from {args.private_key_path}")
 except Exception as e:
     print(f"[ERROR] Failed to load private key: {e}")
     raise SystemExit(1)
 
 
-def b64url_encode(data):
-    if isinstance(data, str):
-        data = data.encode('utf-8')
-    return base64.urlsafe_b64encode(data).rstrip(b'=').decode('utf-8')
-
-
 def create_jwt(pseudo_id, domain_id, session_nullifier, ttl):
-    header_enc = b64url_encode(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(',', ':')))
     now = int(time.time())
-    exp = now + ttl
     payload = {
         "pseudoID": pseudo_id,
-        "domainID": str(domain_id),
+        "domainID": int(domain_id),
         "anonymity": "pseudonymous",
         "sessionNullifier": session_nullifier,
         "iat": now,
-        "exp": exp,
+        "exp": now + ttl,
     }
-    payload_enc = b64url_encode(json.dumps(payload, separators=(',', ':')))
-    message = f"{header_enc}.{payload_enc}".encode('utf-8')
-    sig_enc = b64url_encode(signer.sign(SHA256.new(message)))
-    return f"{header_enc}.{payload_enc}.{sig_enc}"
+    return jwt.encode(payload, _private_key_pem, algorithm="RS256")
 
 
 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Token Issuance Worker started. "
