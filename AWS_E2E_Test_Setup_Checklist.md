@@ -22,9 +22,9 @@ Each app validates only tokens whose `domainID` claim matches its assigned ID �
 
 ## Step 0 — Pre-launch (local machine)
 
-- [ ] Confirm `zk-authaas-key.pem` and `zk-authaas-public.pem` exist in project root
+- [ ] Confirm `zk-authaas-ec2-key.pem` and `zk-authaas-public.pem` exist in project root
   - Already generated — do **not** regenerate (would invalidate the public key on the App EC2)
-- [ ] Note `zk-authaas-key.pem` is in `.gitignore` — never commit it
+- [ ] Note `zk-authaas-ec2-key.pem` is in `.gitignore` — never commit it
 - [ ] Have your EC2 key pair (`zk-authaas-ec2-key.pem`) ready for SSH
 
 ---
@@ -157,7 +157,7 @@ Run this before starting any Docker setup — it catches security group misconfi
 
 ```bash
 # SSH into manager
-ssh -i zk-authaas-key.pem ubuntu@<manager-public-ip>
+ssh -i zk-authaas-ec2-key.pem ubuntu@<manager-public-ip>
 
 # Ping every other node by private IP
 ping -c3 $WORKER_IP
@@ -184,7 +184,7 @@ All apps share the same `docker-compose.app.yml` — only `DOMAIN_ID` differs.
 
 ```bash
 # SSH into App N's EC2
-ssh -i zk-authaas-key.pem ubuntu@<appN-public-ip>
+ssh -i zk-authaas-ec2-key.pem ubuntu@<appN-public-ip>
 
 # Install Docker
 sudo apt update && sudo apt install -y docker.io
@@ -193,7 +193,7 @@ sudo usermod -aG docker ubuntu
 exit
 
 # Re-SSH so the docker group membership takes effect
-ssh -i zk-authaas-key.pem ubuntu@<appN-public-ip>
+ssh -i zk-authaas-ec2-key.pem ubuntu@<appN-public-ip>
 mkdir -p ~/zk-authaas
 ```
 
@@ -201,7 +201,7 @@ Transfer files from your local machine (one `scp` per app, or scripted):
 ```powershell
 # Run from your local machine — once per app (replace N and the IP)
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" `
+scp -i "zk-authaas-ec2-key.pem" `
     zk-authaas-public.pem `
     TokenValidatorService.py `
     Dockerfile.token-validator `
@@ -234,7 +234,7 @@ curl http://localhost:9000/health
 
 **On the manager EC2:**
 ```bash
-ssh -i zk-authaas-key.pem ubuntu@<manager-public-ip>
+ssh -i zk-authaas-ec2-key.pem ubuntu@<manager-public-ip>
 
 # Install Docker
 sudo apt update && sudo apt install -y docker.io
@@ -246,15 +246,15 @@ exit
 **On your local machine — transfer the project files:**
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -r -i "zk-authaas-key.pem" . ubuntu@<manager-public-ip>:~/zk-authaas/
-# Copies everything including zk-authaas-key.pem (excluded from git but needed on the manager).
+scp -r -i "zk-authaas-ec2-key.pem" . ubuntu@<manager-public-ip>:~/zk-authaas/
+# Copies everything including zk-authaas-ec2-key.pem (excluded from git but needed on the manager).
 # If .venv exists and is large, delete it on the manager afterwards:
 #   ssh ubuntu@<manager-public-ip> "rm -rf ~/zk-authaas/.venv"
 ```
 
 **Re-SSH and initialise the Swarm:**
 ```bash
-ssh -i zk-authaas-key.pem ubuntu@<manager-public-ip>
+ssh -i zk-authaas-ec2-key.pem ubuntu@<manager-public-ip>
 
 # Init Swarm
 cd ~/zk-authaas
@@ -267,7 +267,7 @@ docker swarm init --advertise-addr $MANAGER_IP
 ## Step 4 — Worker EC2 Setup
 
 ```bash
-ssh -i zk-authaas-key.pem ubuntu@<worker-public-ip>
+ssh -i zk-authaas-ec2-key.pem ubuntu@<worker-public-ip>
 
 # Install Docker
 sudo apt update && sudo apt install -y docker.io
@@ -276,7 +276,7 @@ sudo usermod -aG docker ubuntu
 exit
 
 # Re-SSH so the docker group membership takes effect
-ssh -i zk-authaas-key.pem ubuntu@<worker-public-ip>
+ssh -i zk-authaas-ec2-key.pem ubuntu@<worker-public-ip>
 
 # Increase inotify watches for snarkjs file watching
 sudo sysctl -w fs.inotify.max_user_watches=524288
@@ -292,7 +292,7 @@ docker swarm join --token <SWARM_JOIN_TOKEN> $MANAGER_IP:2377
 
 **On the k6 EC2:**
 ```bash
-ssh -i zk-authaas-key.pem ubuntu@<k6-public-ip>
+ssh -i zk-authaas-ec2-key.pem ubuntu@<k6-public-ip>
 
 # Install k6
 sudo apt update && sudo apt install -y gpg curl
@@ -305,7 +305,7 @@ sudo apt update && sudo apt install -y k6
 **On your local machine — transfer the load test script:**
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" load_test.js ubuntu@<k6-public-ip>:~/
+scp -i "zk-authaas-ec2-key.pem" load_test.js ubuntu@<k6-public-ip>:~/
 ```
 
 ---
@@ -407,7 +407,7 @@ done
 
 ```bash
 # SSH into k6 EC2
-ssh -i zk-authaas-key.pem ubuntu@<k6-public-ip>
+ssh -i zk-authaas-ec2-key.pem ubuntu@<k6-public-ip>
 
 # Raise file descriptor limit — each VU holds one open connection.
 # The OS default of 1024 causes k6 to freeze above ~800 VUs.
@@ -419,7 +419,7 @@ Transfer scripts from your **local machine**:
 
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" `
+scp -i "zk-authaas-ec2-key.pem" `
   load_test.js `
   sweep_throughput.py `
   ubuntu@<k6-public-ip>:~/
@@ -502,7 +502,7 @@ Copy results back and plot:
 
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/sweep_e2e_baseline.csv .
+scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/sweep_e2e_baseline.csv .
 python visualize_sweep.py --input sweep_e2e_baseline.csv --output sweep_e2e_baseline_graph.png
 ```
 
@@ -520,7 +520,7 @@ Make sure the k6 EC2 has the latest `load_test.js` and `visualize_k6_per_app.py`
 
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" `
+scp -i "zk-authaas-ec2-key.pem" `
   load_test.js `
   visualize_k6_per_app.py `
   ubuntu@<k6-public-ip>:~/
@@ -561,7 +561,7 @@ k6 prints a live summary every 10 s. Watch `e2e_latency{domain:N}` values shift 
 
 ```powershell
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results_e2e.csv .
+scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_e2e.csv .
 
 # Single overlaid latency graph — all 5 domains, focus-switch markers at 20/40/60/80 s
 python visualize_k6_per_app.py
