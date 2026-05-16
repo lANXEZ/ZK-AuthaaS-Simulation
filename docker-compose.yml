@@ -140,7 +140,7 @@ services:
       - "--stark-count"
       - "0"
       - "--routing"
-      - "weighted"
+      - "roundrobin"
       - "--snark-cost-weight"
       - "1.0"
       - "--stark-cost-weight"
