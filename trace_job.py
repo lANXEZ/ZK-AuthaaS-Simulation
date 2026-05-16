@@ -78,7 +78,7 @@ def trace_one(target: str, redis_client: redis.Redis, domain: int, max_wait_s: f
     t0 = time.monotonic()
     resp = requests.post(submit_url, json=body, timeout=5.0)
     t_submit_returned = time.monotonic() - t0
-    if resp.status_code != 200:
+    if resp.status_code not in (200, 202):
         print(f"  [ERROR] submit returned {resp.status_code}: {resp.text}")
         return
     job_id = resp.json().get("job_id")
