@@ -28,18 +28,17 @@ const ITERATIONS = parseInt(__ENV.ITERATIONS || '3000');
 const MAX_DURATION = __ENV.MAX_DURATION || '15m';
 
 // ------------------------------------------
-// Distribution phases — edit to change pattern over time.
+// Distribution phases — each domain gets 20 s in the spotlight.
+// Hot domain receives 60 % of traffic; the other four share 10 % each (sums to 100 %).
 // Each phase: { duration: seconds, weights: [domain0, domain1, domain2, domain3, domain4] }
-// Weights are relative; they do NOT need to sum to 100.
-// After all phases elapse, the last phase's weights are used until test ends.
+// After all phases elapse the last phase's weights are kept until the test ends.
 // ------------------------------------------
 const PHASES = [
-  { duration: 15, weights: [60, 10, 10, 10, 10] },   // domain 0 hot
-  { duration: 15, weights: [10, 60, 10, 10, 10] },   // domain 1 hot (mid-test switch)
-  { duration: 15, weights: [10, 10, 60, 10, 10] },   // domain 2 hot
-  { duration: 15, weights: [10, 10, 10, 60, 10] },   // domain 3 hot
-  { duration: 15, weights: [10, 10, 10, 10, 60] },   // domain 4 hot
-  { duration: 60, weights: [20, 20, 20, 20, 20] },   // even
+  { duration: 20, weights: [60, 10, 10, 10, 10] },   // 0–20 s   domain 0 hot
+  { duration: 20, weights: [10, 60, 10, 10, 10] },   // 20–40 s  domain 1 hot
+  { duration: 20, weights: [10, 10, 60, 10, 10] },   // 40–60 s  domain 2 hot
+  { duration: 20, weights: [10, 10, 10, 60, 10] },   // 60–80 s  domain 3 hot
+  { duration: 20, weights: [10, 10, 10, 10, 60] },   // 80–100 s domain 4 hot
 ];
 
 // Precompute cumulative end times for fast lookup

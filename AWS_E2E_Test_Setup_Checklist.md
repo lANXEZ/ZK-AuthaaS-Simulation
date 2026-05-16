@@ -332,16 +332,15 @@ k6 run \
   -e TARGET=<manager-private-ip> \
   -e VUS=10 \
   -e ITERATIONS=50 \
-  -e STARK_RATIO=0.0 \
   load_test.js
 ```
 
-**Expected:** k6 exits cleanly, `failed_verifications=0`, `submit_failures=0`.
+**Expected:** k6 exits cleanly, `submit_failures{count}<10` threshold passes, no errors in summary.
 
-> If `failed_verifications` > 0, check:
+> If jobs don't complete, check:
 > - App EC2 is running: `curl http://<app-ip>:9000/health`
-> - App can reach proof-queue Redis: check `docker compose logs` on App EC2
-> - token-issuer is posting to app: `docker service logs zk_token-issuer --tail 20`
+> - App can reach proof-queue Redis: `docker compose -f docker-compose.app.yml logs token-validator | tail -20` on App EC2
+> - token-issuer is posting to apps: `docker service logs zk_token-issuer --tail 20`
 
 ---
 
@@ -350,19 +349,21 @@ k6 run \
 `load_test.js` has a `PHASES` array near the top — each phase has a duration (seconds) and a 5-element weight vector for domains 0..4. Edit it before running k6:
 
 ```javascript
+// Current default — 20 s focus window rotating through each domain
 const PHASES = [
-  { duration: 15, weights: [60, 10, 10, 10, 10] },   // domain 0 hot for 15s
-  { duration: 15, weights: [10, 60, 10, 10, 10] },   // shift to domain 1
-  { duration: 15, weights: [10, 10, 60, 10, 10] },   // shift to domain 2
-  { duration: 15, weights: [10, 10, 10, 60, 10] },   // shift to domain 3
-  { duration: 15, weights: [10, 10, 10, 10, 60] },   // shift to domain 4
-  { duration: 60, weights: [20, 20, 20, 20, 20] },   // even split
+  { duration: 20, weights: [60, 10, 10, 10, 10] },   // 0–20 s   domain 0 hot
+  { duration: 20, weights: [10, 60, 10, 10, 10] },   // 20–40 s  domain 1 hot
+  { duration: 20, weights: [10, 10, 60, 10, 10] },   // 40–60 s  domain 2 hot
+  { duration: 20, weights: [10, 10, 10, 60, 10] },   // 60–80 s  domain 3 hot
+  { duration: 20, weights: [10, 10, 10, 10, 60] },   // 80–100 s domain 4 hot
 ];
 ```
 
-- Weights are **relative** — they do not need to sum to 100.
-- After all phases elapse, the last phase's weights are used until the test ends.
+- The hot domain receives **60 %** of requests; the other four each receive **10 %** (sums to 100 %).
+- Weights are **relative** — they do not need to sum to 100; only the ratios matter.
+- After all phases elapse, the last phase's weights are kept until the test ends.
 - Every metric is tagged with `domain=N` so the CSV output can be sliced per domain.
+- The visualizer draws vertical markers at each phase boundary so you can see domain reactions instantly.
 
 ---
 
@@ -379,7 +380,6 @@ python3 sweep_throughput.py \
   --vus 50,100,200,300,400,500,600,800,1000,1500 \
   --iterations-per-vu 10 \
   --cooldown 15 \
-  --stark-ratio 0.0 \
   --output sweep_e2e_baseline.csv \
   --clean
 ```
@@ -404,36 +404,79 @@ python visualize_sweep.py --input sweep_e2e_baseline.csv --output sweep_e2e_base
 
 ---
 
-## Step 13 — Detailed Time-Series Run
+## Step 13 — Shifting-Focus Distribution Test
 
-Single long run at `KNEE_VU` to capture the full time-series CSV:
+This is the main characterisation run. The test rotates the "hot" domain every 20 s (domain 0 → 1 → 2 → 3 → 4), giving each domain 60 % of traffic while it is focused and 10 % when it is not. Running at `KNEE_VU` keeps the system under meaningful load throughout the entire rotation.
+
+### 13a — Transfer the updated test files (local machine)
+
+Make sure the k6 EC2 has the latest `load_test.js` and `visualize_k6_per_app.py` before running.
+
+**Git Bash:**
+```bash
+cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" \
+  load_test.js \
+  visualize_k6_per_app.py \
+  ubuntu@<k6-public-ip>:~/
+```
+
+**PowerShell:**
+```powershell
+cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
+scp -i "zk-authaas-key.pem" `
+  load_test.js `
+  visualize_k6_per_app.py `
+  ubuntu@<k6-public-ip>:~/
+```
+
+### 13b — Run the shifting-focus test
 
 ```bash
-# On k6 EC2 (inside tmux)
+# On k6 EC2 (inside tmux, after ulimit)
 ulimit -n 65536
+
 k6 run \
   -e TARGET=<manager-private-ip> \
   -e VUS=<KNEE_VU> \
-  -e ITERATIONS=<KNEE_VU * 200> \
-  -e STARK_RATIO=0.0 \
+  -e ITERATIONS=<KNEE_VU * 20> \
+  -e MAX_DURATION=3m \
   load_test.js \
   --out csv=test_results_e2e.csv
 ```
 
-> With KNEE_VU ~400–500, `KNEE_VU * 200` gives 80 000–100 000 iterations. Expected runtime ~2–3 minutes.
+> **ITERATIONS guidance:** `KNEE_VU * 20` is a conservative minimum that ensures all 5 phase windows
+> (5 × 20 s = 100 s total) complete before the iteration pool exhausts.  
+> Example: KNEE_VU = 400 → use `ITERATIONS=8000` and `MAX_DURATION=3m`.
 
-Copy back and visualize:
+**What to expect during the run:**
+
+| Time (s) | Focused domain | Expected behaviour |
+|----------|----------------|--------------------|
+| 0–20     | Domain 0       | Domain 0 latency rises; others stay low |
+| 20–40    | Domain 1       | Domain 0 recovers; Domain 1 latency rises |
+| 40–60    | Domain 2       | Rotation continues |
+| 60–80    | Domain 3       | Rotation continues |
+| 80–100   | Domain 4       | Domain 4 latency rises last |
+
+k6 prints a live summary every 10 s. Watch `e2e_latency{domain:N}` values shift as each domain takes the load.
+
+### 13c — Copy results back and visualize
 
 **Git Bash:**
 ```bash
 cd "/e/Work/VSCode Repo/ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results_e2e.csv .
 
-# Overall time-series (all apps combined)
-python visualize_k6.py
+# Single overlaid latency graph — all 5 domains, focus-switch markers at 20/40/60/80 s
+python visualize_k6_per_app.py
+# → latency_graph.png
 
-# Per-domain throughput & latency (uses the domain=N tags k6 wrote into the CSV)
-python visualize_k6_per_app.py --input test_results_e2e.csv --output per_domain_graph.png
+# Optional: widen the smoothing window if the lines look noisy
+python visualize_k6_per_app.py --bucket 3
+
+# Optional: clean graph without the phase markers
+python visualize_k6_per_app.py --no-markers
 ```
 
 **PowerShell:**
@@ -441,11 +484,26 @@ python visualize_k6_per_app.py --input test_results_e2e.csv --output per_domain_
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
 scp -i "zk-authaas-key.pem" ubuntu@<k6-public-ip>:~/test_results_e2e.csv .
 
-python visualize_k6.py
-python visualize_k6_per_app.py --input test_results_e2e.csv --output per_domain_graph.png
+python visualize_k6_per_app.py
+python visualize_k6_per_app.py --bucket 3       # optional — smoother lines
+python visualize_k6_per_app.py --no-markers     # optional — no phase lines
 ```
 
-The per-domain script prints a summary table (completed / failed / p50 / p95 / p99 per domain) and saves a two-panel PNG: throughput-over-time and p95-latency-over-time, one line per domain. Phase transitions should be visible as the dominant domain changes.
+The script prints a per-domain summary table and saves `latency_graph.png`:
+
+```
+=== Per-Domain Latency Summary ===
+Domain    Samples    p50 (ms)    p95 (ms)    p99 (ms)    max (ms)
+0         ...        ...         ...         ...         ...
+1         ...
+...
+```
+
+**Reading the graph:**
+- Five coloured p95-latency lines, one per domain (blue, orange, green, red, purple)
+- Vertical dashed lines at t = 20, 40, 60, 80 s mark when the focused domain rotates
+- Coloured "Dom N hot" labels above each region identify which domain is carrying 60 % of traffic
+- A domain's line should **rise when it becomes hot** and **fall when the focus moves away** — if it doesn't, investigate token-issuer routing or validator throughput
 
 ---
 
