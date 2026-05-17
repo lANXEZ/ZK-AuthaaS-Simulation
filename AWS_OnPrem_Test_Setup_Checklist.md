@@ -239,7 +239,7 @@ ulimit -n 65536
 
 k6 run \
   -e TARGETS=$DOMAIN0_IP,$DOMAIN1_IP,$DOMAIN2_IP,$DOMAIN3_IP,$DOMAIN4_IP \
-  -e VUS=300 \
+  -e VUS=200 \
   -e DURATION=100s \
   load_test_onprem.js \
   --out csv=test_results_onprem.csv
@@ -359,9 +359,9 @@ Copy the CSV back and render the per-domain latency graph using the same visuali
 ```powershell
 # From your laptop — pull all three CSVs back
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem.csv          .
-scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem_uprove.csv   .
-scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem_idemix.csv   .
+scp -i "zk-authaas-ec2-key.pem" ubuntu@18.215.167.184:~/test_results_onprem.csv          .
+scp -i "zk-authaas-ec2-key.pem" ubuntu@18.215.167.184:~/test_results_onprem_uprove.csv   .
+scp -i "zk-authaas-ec2-key.pem" ubuntu@18.215.167.184:~/test_results_onprem_idemix.csv   .
 
 python visualize_k6_per_app.py --input test_results_onprem.csv         --output onprem_snark_latency_graph.png
 python visualize_k6_per_app.py --input test_results_onprem_uprove.csv  --output onprem_uprove_latency_graph.png

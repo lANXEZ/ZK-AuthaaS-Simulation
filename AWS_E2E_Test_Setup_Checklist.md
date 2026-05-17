@@ -380,6 +380,14 @@ cd ~/zk-authaas
 docker compose build snark-verifier
 ```
 
+> **Important — both halves are mandatory.** Swarm does NOT push images
+> across nodes. If you skip the worker build, `docker service ls` will
+> show `zk_snark-verifier 0/32` after deploy and `docker service ps
+> zk_snark-verifier --no-trunc` will log `No such image:
+> zk-authaas/snark-verifier:latest` on every scheduling attempt. Fix by
+> building on the worker and then `docker service update --force
+> zk_snark-verifier` on the manager.
+
 ---
 
 ## Step 8 — Deploy Stack
