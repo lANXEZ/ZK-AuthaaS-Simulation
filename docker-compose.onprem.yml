@@ -16,10 +16,12 @@ services:
   # ------------------------------------------
   proof-queue:
     image: redis:latest
+    cpus: 0.3
     networks: [onprem-net]
 
   snark-queue:
     image: redis:latest
+    cpus: 0.3
     networks: [onprem-net]
 
   # ------------------------------------------
@@ -30,6 +32,7 @@ services:
       context: .
       dockerfile: Dockerfile.requesthandler
     image: zk-authaas/request-handler:latest
+    cpus: 1.8
     depends_on: [proof-queue]
     environment:
       - PYTHONUNBUFFERED=1
@@ -52,6 +55,7 @@ services:
       context: .
       dockerfile: Dockerfile.selector
     image: zk-authaas/verifier-selector:latest
+    cpus: 0.6
     depends_on: [proof-queue, snark-queue]
     environment:
       - PYTHONUNBUFFERED=1
@@ -94,6 +98,7 @@ services:
       context: .
       dockerfile: Dockerfile.snark
     image: zk-authaas/snark-verifier:latest
+    cpus: 1.1
     depends_on: [snark-queue, proof-queue]
     environment:
       - TASK_SLOT=1

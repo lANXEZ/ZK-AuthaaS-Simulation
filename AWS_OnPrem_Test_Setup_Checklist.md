@@ -29,7 +29,20 @@ The expected story: under the **hot-domain phase weights (60% to one domain)**, 
 | **Domain 0..4** | c5.4xlarge    | 5     | 16   | 32 GB | Self-contained stack per domain (cap to ~12 used)    |
 | **k6**          | c5.large      | 1     | 2    | 4 GB  | Load generator, picks domain by phase weights        |
 
-Total: **6 EC2 instances.** The c5.4xlarge has 16 vCPU but the stack is sized so its actual usage stays ≤12 vCPU under load (matching the service test's 60-vCPU total). The remaining 4 vCPU is headroom — do not bump SNARK count higher than 8 or the comparison stops being apples-to-apples.
+Total: **6 EC2 instances.** The c5.4xlarge has 16 vCPU but `docker-compose.onprem.yml` sets explicit `cpus:` limits on every service that sum to **11.8 vCPU** per domain (close to the 12-vCPU target, with ~0.2 vCPU headroom for the kernel + Docker daemon). The remaining ~4 vCPU on each c5.4xlarge stays idle to ensure the comparison vs. the service model's 60-vCPU total is enforced, not just guidance.
+
+Per-domain CPU budget (set in compose file):
+
+| Service                | cpus limit |
+|------------------------|-----------|
+| proof-queue (Redis)    | 0.3 |
+| snark-queue (Redis)    | 0.3 |
+| request-handler        | 1.8 |
+| verifier-selector      | 0.6 |
+| 8 × snark-verifier     | 1.1 each → 8.8 |
+| **Total per domain**   | **11.8 vCPU** |
+
+Do not bump SNARK count higher than 8 or the comparison stops being apples-to-apples.
 
 Estimated spot cost: **~$0.74/hr** → **~$4.80/session** (6.5 hr including setup/teardown).
 
@@ -217,7 +230,7 @@ ulimit -n 65536
 
 k6 run \
   -e TARGETS=$DOMAIN0_IP,$DOMAIN1_IP,$DOMAIN2_IP,$DOMAIN3_IP,$DOMAIN4_IP \
-  -e VUS=200 \
+  -e VUS=300 \
   -e DURATION=100s \
   load_test_onprem.js \
   --out csv=test_results_onprem.csv
