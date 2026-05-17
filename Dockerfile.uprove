@@ -1,0 +1,10 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY uprove_verifier.py .
+COPY UProveVerifierWorker.py .
+
+RUN pip install --no-cache-dir redis==5.0.4
+
+CMD ["python", "UProveVerifierWorker.py"]

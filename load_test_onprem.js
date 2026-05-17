@@ -10,9 +10,16 @@ import { Trend, Counter } from 'k6/metrics';
 // No centralised service. No cross-domain pooling.
 //
 // USAGE:
+//   # SNARK on-prem (default)
 //   k6 run -e TARGETS=10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4,10.0.0.5 \
 //          -e DURATION=100s load_test_onprem.js \
-//          --out csv=test_results_onprem.csv
+//          --out csv=test_results_onprem_snark.csv
+//
+//   # U-Prove on-prem (pass ALG=uprove; reads bundle from uprove_proof.json
+//   # in the same directory)
+//   k6 run -e TARGETS=10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4,10.0.0.5 \
+//          -e DURATION=100s -e ALG=uprove load_test_onprem.js \
+//          --out csv=test_results_onprem_uprove.csv
 //
 //   The TARGETS env var is a comma-separated list of the 5 domain IPs
 //   (in domain-id order 0..4). Port defaults to 8000.
@@ -22,6 +29,10 @@ import { Trend, Counter } from 'k6/metrics';
 // ==========================================
 
 const PORT = __ENV.PORT || '8000';
+const ALG  = (__ENV.ALG || 'snark').toLowerCase();
+if (ALG !== 'snark' && ALG !== 'uprove') {
+  throw new Error(`ALG must be 'snark' or 'uprove' (got '${ALG}').`);
+}
 
 const _targetsRaw = (__ENV.TARGETS || '').trim();
 if (!_targetsRaw) {
@@ -84,6 +95,11 @@ export const options = {
     'submit_failures': ['count<10'],
   },
 };
+
+// U-Prove bundle is loaded from disk at init time (k6 requires open() to be
+// at module top level — runtime open() inside default() is forbidden).
+// File expected next to this script on the k6 EC2.
+const UPROVE_BUNDLE = ALG === 'uprove' ? JSON.parse(open('./uprove_proof.json')) : null;
 
 // Same valid groth16 proof as load_test.js
 const SNARK_PROOF = {
@@ -149,10 +165,13 @@ export default function (data) {
   const baseUrl = BASE_URLS[domainId];      // ← the key difference: domain selects the WHOLE URL
 
   // domain_id in the payload is harmless (request-handler accepts it, ignores it in on-prem).
+  // 'scheme' is just a routing label used by the selector — both algorithms set it
+  // to 'snark' so they share the same queue plumbing. The worker container running
+  // on each domain determines which algorithm actually verifies the proof.
   const payload = JSON.stringify({
     scheme: 'snark',
-    proof: SNARK_PROOF,
-    public_inputs: SNARK_PUBLIC_SIGNALS,
+    proof: ALG === 'uprove' ? UPROVE_BUNDLE : SNARK_PROOF,
+    public_inputs: ALG === 'uprove' ? [] : SNARK_PUBLIC_SIGNALS,
     domain_id: domainId,
   });
   const params = { headers: { 'Content-Type': 'application/json' } };

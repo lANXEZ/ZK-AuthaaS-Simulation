@@ -12,11 +12,12 @@
 |---|---|---|
 | Topology | 1 manager + 1 worker + 5 apps + 1 k6 = 8 EC2s | **5 domain EC2s + 1 k6 = 6 EC2s** |
 | Total vCPU budget | ~60 (4 + 36 + 20) | **60 (12 × 5 domains)** |
-| Verifiers | 32 SNARK on shared worker EC2 | **8 SNARK per domain × 5 = 40 total** |
+| Verifiers | 32 SNARK on shared worker EC2 | **8 SNARK or 8 U-Prove per domain × 5 = 40 total** |
 | Cross-domain pooling | Yes — all 32 workers serve any domain | **No** — each domain has only its own 8 |
 | Token issuance | Yes (RS256 JWT, validator on app side) | **No** — verify success IS the completion |
 | Selector routing | Weighted (cost-aware) | **Round-robin** |
 | k6 endpoint | One (the manager) | **5** (one per domain) |
+| Verification algorithm | groth16 SNARK only | **groth16 SNARK or U-Prove** (selectable per run) |
 
 The expected story: under the **hot-domain phase weights (60% to one domain)**, the on-prem model has to absorb the burst with just 8 verifiers while the other 32 sit idle. The service model pools all 32 against whichever domain is hot.
 
@@ -145,8 +146,15 @@ git clone https://github.com/lANXEZ/ZK-AuthaaS-Simulation.git ~/zk-authaas
 cd ~/zk-authaas
 
 # Build and start the on-prem stack
+# For SNARK runs:
 docker compose -f docker-compose.onprem.yml build
 docker compose -f docker-compose.onprem.yml up -d
+#
+# To switch this domain to U-Prove instead, run:
+#   docker compose -f docker-compose.onprem.yml down
+#   docker compose -f docker-compose.onprem-uprove.yml build
+#   docker compose -f docker-compose.onprem-uprove.yml up -d
+# (See "Step 5b — U-Prove run" below for the full A/B procedure.)
 
 # Wait for everything to come up
 sleep 5
@@ -186,6 +194,7 @@ sudo apt update && sudo apt install -y k6
 rm -rf ~/zk-authaas
 git clone https://github.com/lANXEZ/ZK-AuthaaS-Simulation.git ~/zk-authaas
 ln -sf ~/zk-authaas/load_test_onprem.js ~/load_test_onprem.js
+ln -sf ~/zk-authaas/uprove_proof.json   ~/uprove_proof.json   # needed for ALG=uprove runs
 ln -sf ~/zk-authaas/visualize_k6_per_app.py ~/visualize_k6_per_app.py
 ```
 
@@ -246,6 +255,50 @@ Summary thresholds to watch:
 - `verification completed` check ratio should stay > 95%
 - `e2e_latency` p95 — compare to the service test's value at the same VUS
 
+This produces `test_results_onprem.csv` (SNARK on-prem baseline). Save it before
+moving on to the U-Prove run, otherwise the next step's output will overwrite it.
+
+---
+
+## Step 5b — U-Prove run (same workload, different algorithm)
+
+After capturing the SNARK on-prem results above, swap each domain's worker
+stack from SNARK to U-Prove and re-run the same k6 script with `-e ALG=uprove`.
+The request-handler, selector, and Redis containers are unchanged — only the
+8 verifier replicas per domain are different.
+
+**On every domain EC2 (0..4):**
+```bash
+cd ~/zk-authaas
+docker compose -f docker-compose.onprem.yml down
+git pull   # picks up uprove_verifier.py, UProveVerifierWorker.py, Dockerfile.uprove, docker-compose.onprem-uprove.yml
+docker compose -f docker-compose.onprem-uprove.yml build
+docker compose -f docker-compose.onprem-uprove.yml up -d
+sleep 5
+docker compose -f docker-compose.onprem-uprove.yml ps
+# All 12 containers should be 'running' — now with uprove-verifier-0..7 instead of snark-verifier-0..7
+```
+
+**On the k6 EC2:**
+```bash
+cd ~/zk-authaas && git pull && cd ~
+ulimit -n 65536
+
+k6 run \
+  -e TARGETS=$DOMAIN0_IP,$DOMAIN1_IP,$DOMAIN2_IP,$DOMAIN3_IP,$DOMAIN4_IP \
+  -e VUS=200 \
+  -e DURATION=100s \
+  -e ALG=uprove \
+  load_test_onprem.js \
+  --out csv=test_results_onprem_uprove.csv
+```
+
+> **Note on U-Prove verify cost:** the pure-Python EC implementation in
+> `uprove_verifier.py` is significantly slower per-verify than snarkjs's
+> groth16 (~10–100× depending on attribute count). Expect lower throughput
+> and higher latency than the SNARK on-prem run — that performance gap is
+> exactly the comparison this test is designed to surface.
+
 ---
 
 ## Step 6 — Visualize and Compare
@@ -253,15 +306,19 @@ Summary thresholds to watch:
 Copy the CSV back and render the per-domain latency graph using the same visualiser as the service test.
 
 ```powershell
-# From your laptop
+# From your laptop — pull both CSVs back
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
 scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem.csv .
-python visualize_k6_per_app.py --input test_results_onprem.csv --output onprem_latency_graph.png
+scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem_uprove.csv .
+
+python visualize_k6_per_app.py --input test_results_onprem.csv        --output onprem_snark_latency_graph.png
+python visualize_k6_per_app.py --input test_results_onprem_uprove.csv --output onprem_uprove_latency_graph.png
 ```
 
-You now have two graphs in identical style:
+You now have three graphs in identical style:
 - `latency_graph.png` (service model, from the earlier test)
-- `onprem_latency_graph.png` (on-prem baseline)
+- `onprem_snark_latency_graph.png` (on-prem with SNARK verifier)
+- `onprem_uprove_latency_graph.png` (on-prem with U-Prove verifier)
 
 **Reading the comparison:**
 - During each hot-domain window, the on-prem graph should show that domain's line **rise visibly** (its 8 verifiers are now serving 60% of total traffic), while the cold-domain lines stay flat.
@@ -273,8 +330,9 @@ You now have two graphs in identical style:
 ## Step 7 — Teardown
 
 ```bash
-# On EACH domain EC2 (0..4):
-docker compose -f ~/zk-authaas/docker-compose.onprem.yml down
+# On EACH domain EC2 (0..4) — bring down whichever stack is currently running:
+docker compose -f ~/zk-authaas/docker-compose.onprem.yml         down 2>/dev/null
+docker compose -f ~/zk-authaas/docker-compose.onprem-uprove.yml  down 2>/dev/null
 
 # Terminate all 6 EC2 instances (AWS Console or CLI):
 aws ec2 terminate-instances --instance-ids \

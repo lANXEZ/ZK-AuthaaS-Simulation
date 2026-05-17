@@ -1,0 +1,214 @@
+# Per-domain on-prem stack — U-PROVE variant.
+# Parallel to docker-compose.onprem.yml, but the SNARK verifier containers are
+# replaced with U-Prove verifier containers. The rest of the stack (request-
+# handler, selector, Redis) is identical so per-domain latency numbers are
+# directly comparable between algorithms.
+#
+# Run ONE copy on EACH of the 5 domain EC2s:
+#   docker compose -f docker-compose.onprem-uprove.yml build
+#   docker compose -f docker-compose.onprem-uprove.yml up -d
+
+services:
+
+  proof-queue:
+    image: redis:latest
+    cpus: 0.3
+    networks: [onprem-net]
+
+  snark-queue:
+    image: redis:latest
+    cpus: 0.3
+    networks: [onprem-net]
+
+  request-handler:
+    build:
+      context: .
+      dockerfile: Dockerfile.requesthandler
+    image: zk-authaas/request-handler:latest
+    cpus: 1.8
+    depends_on: [proof-queue]
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "python"
+      - "requestHandler.py"
+      - "--redis-host"
+      - "proof-queue"
+      - "--redis-port"
+      - "6379"
+    ports:
+      - "8000:8000"
+    networks: [onprem-net]
+
+  verifier-selector:
+    build:
+      context: .
+      dockerfile: Dockerfile.selector
+    image: zk-authaas/verifier-selector:latest
+    cpus: 0.6
+    depends_on: [proof-queue, snark-queue]
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "python"
+      - "verifierSelector.py"
+      - "--proof-host"
+      - "proof-queue"
+      - "--proof-port"
+      - "6379"
+      - "--snark-host"
+      - "snark-queue"
+      - "--snark-port"
+      - "6379"
+      - "--stark-host"
+      - "snark-queue"   # unused but required
+      - "--stark-port"
+      - "6379"
+      - "--snark-count"
+      - "8"
+      - "--stark-count"
+      - "0"
+      - "--routing"
+      - "roundrobin"
+      - "--snark-cost-weight"
+      - "1.0"
+      - "--stark-cost-weight"
+      - "1.0"
+    networks: [onprem-net]
+
+  # ------------------------------------------
+  # 8 U-Prove verifiers — same queue plumbing as the SNARK variant.
+  # The verifier-selector still routes via the "snark" scheme label
+  # (the k6 payload sends scheme=snark even in U-Prove mode — the label is
+  # just a routing hint, not a content type), so jobs land on snark_queue:N
+  # and our U-Prove workers consume them from there.
+  # ------------------------------------------
+  uprove-verifier-0: &uprove-base
+    build:
+      context: .
+      dockerfile: Dockerfile.uprove
+    image: zk-authaas/uprove-verifier:latest
+    cpus: 1.1
+    depends_on: [snark-queue, proof-queue]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TASK_SLOT=1
+    command:
+      - "python"
+      - "UProveVerifierWorker.py"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--index"
+      - "0"
+    networks: [onprem-net]
+
+  uprove-verifier-1:
+    <<: *uprove-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TASK_SLOT=2
+    command:
+      - "python"
+      - "UProveVerifierWorker.py"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--index"
+      - "1"
+
+  uprove-verifier-2:
+    <<: *uprove-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TASK_SLOT=3
+    command:
+      - "python"
+      - "UProveVerifierWorker.py"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--index"
+      - "2"
+
+  uprove-verifier-3:
+    <<: *uprove-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TASK_SLOT=4
+    command:
+      - "python"
+      - "UProveVerifierWorker.py"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--index"
+      - "3"
+
+  uprove-verifier-4:
+    <<: *uprove-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TASK_SLOT=5
+    command:
+      - "python"
+      - "UProveVerifierWorker.py"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--index"
+      - "4"
+
+  uprove-verifier-5:
+    <<: *uprove-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TASK_SLOT=6
+    command:
+      - "python"
+      - "UProveVerifierWorker.py"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--index"
+      - "5"
+
+  uprove-verifier-6:
+    <<: *uprove-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TASK_SLOT=7
+    command:
+      - "python"
+      - "UProveVerifierWorker.py"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--index"
+      - "6"
+
+  uprove-verifier-7:
+    <<: *uprove-base
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TASK_SLOT=8
+    command:
+      - "python"
+      - "UProveVerifierWorker.py"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--index"
+      - "7"
+
+networks:
+  onprem-net:
+    driver: bridge
