@@ -1,0 +1,19 @@
+# Multi-stage build for the Idemix verifier worker.
+# Stage 1 compiles the Go binary; Stage 2 ships only the binary + .bin files.
+
+FROM golang:1.21-bookworm AS build
+WORKDIR /src
+COPY idemix/go.mod ./
+COPY idemix/IdemixVerifierWorker.go ./
+# Resolve transitive deps (hyperledger/fabric pulls a long chain). Cached
+# across builds via the Go module cache.
+RUN go mod tidy && go build -o /out/idemix-worker IdemixVerifierWorker.go
+
+FROM debian:bookworm-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/idemix-worker /app/idemix-worker
+COPY idemix/idemix_proof.bin          /app/idemix/idemix_proof.bin
+COPY idemix/issuer_public_key.bin     /app/idemix/issuer_public_key.bin
+COPY idemix/revocation_public_key.bin /app/idemix/revocation_public_key.bin
+ENTRYPOINT ["/app/idemix-worker"]

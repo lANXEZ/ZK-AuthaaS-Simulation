@@ -21,6 +21,12 @@ import { Trend, Counter } from 'k6/metrics';
 //          -e DURATION=100s -e ALG=uprove load_test_onprem.js \
 //          --out csv=test_results_onprem_uprove.csv
 //
+//   # Idemix on-prem (proof + keys are baked into the verifier container;
+//   # k6 just sends a trigger payload)
+//   k6 run -e TARGETS=10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4,10.0.0.5 \
+//          -e DURATION=100s -e ALG=idemix load_test_onprem.js \
+//          --out csv=test_results_onprem_idemix.csv
+//
 //   The TARGETS env var is a comma-separated list of the 5 domain IPs
 //   (in domain-id order 0..4). Port defaults to 8000.
 //
@@ -30,8 +36,8 @@ import { Trend, Counter } from 'k6/metrics';
 
 const PORT = __ENV.PORT || '8000';
 const ALG  = (__ENV.ALG || 'snark').toLowerCase();
-if (ALG !== 'snark' && ALG !== 'uprove') {
-  throw new Error(`ALG must be 'snark' or 'uprove' (got '${ALG}').`);
+if (ALG !== 'snark' && ALG !== 'uprove' && ALG !== 'idemix') {
+  throw new Error(`ALG must be 'snark', 'uprove', or 'idemix' (got '${ALG}').`);
 }
 
 const _targetsRaw = (__ENV.TARGETS || '').trim();
@@ -165,13 +171,30 @@ export default function (data) {
   const baseUrl = BASE_URLS[domainId];      // ← the key difference: domain selects the WHOLE URL
 
   // domain_id in the payload is harmless (request-handler accepts it, ignores it in on-prem).
-  // 'scheme' is just a routing label used by the selector — both algorithms set it
+  // 'scheme' is just a routing label used by the selector — all three algorithms set it
   // to 'snark' so they share the same queue plumbing. The worker container running
   // on each domain determines which algorithm actually verifies the proof.
+  //
+  // For Idemix: the worker has the proof + issuer + revocation keys baked into its
+  // image (from idemix/*.bin), so k6's payload is a trivial trigger. This matches
+  // the SNARK/U-Prove pattern of "verify the same constant proof every request" —
+  // the only thing varying across the 3 algorithms is the verifier algorithm itself.
+  let proofField;
+  let publicInputsField;
+  if (ALG === 'uprove') {
+    proofField = UPROVE_BUNDLE;
+    publicInputsField = [];
+  } else if (ALG === 'idemix') {
+    proofField = {};
+    publicInputsField = [];
+  } else {
+    proofField = SNARK_PROOF;
+    publicInputsField = SNARK_PUBLIC_SIGNALS;
+  }
   const payload = JSON.stringify({
     scheme: 'snark',
-    proof: ALG === 'uprove' ? UPROVE_BUNDLE : SNARK_PROOF,
-    public_inputs: ALG === 'uprove' ? [] : SNARK_PUBLIC_SIGNALS,
+    proof: proofField,
+    public_inputs: publicInputsField,
     domain_id: domainId,
   });
   const params = { headers: { 'Content-Type': 'application/json' } };

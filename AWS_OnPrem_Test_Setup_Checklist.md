@@ -17,7 +17,7 @@
 | Token issuance | Yes (RS256 JWT, validator on app side) | **No** — verify success IS the completion |
 | Selector routing | Weighted (cost-aware) | **Round-robin** |
 | k6 endpoint | One (the manager) | **5** (one per domain) |
-| Verification algorithm | groth16 SNARK only | **groth16 SNARK or U-Prove** (selectable per run) |
+| Verification algorithm | groth16 SNARK only | **groth16 SNARK, U-Prove, or Idemix** (selectable per run) |
 
 The expected story: under the **hot-domain phase weights (60% to one domain)**, the on-prem model has to absorb the burst with just 8 verifiers while the other 32 sit idle. The service model pools all 32 against whichever domain is hot.
 
@@ -301,24 +301,78 @@ k6 run \
 
 ---
 
+## Step 5c — Idemix run (same workload, third algorithm)
+
+Same A/B procedure as Step 5b, but swap to the Idemix stack. The Idemix
+verifier is a compiled Go binary using `hyperledger/fabric/idemix` — the
+proof + issuer public key + revocation public key are baked into the image
+from `idemix/*.bin`, so the k6 payload is just a trigger.
+
+**On every domain EC2 (0..4):**
+```bash
+cd ~/zk-authaas
+docker compose -f docker-compose.onprem-uprove.yml down 2>/dev/null
+docker compose -f docker-compose.onprem.yml down 2>/dev/null
+git pull   # picks up idemix/, Dockerfile.idemix, docker-compose.onprem-idemix.yml
+# First build of the Idemix image takes 3–5 minutes (Go module download + compile
+# of hyperledger/fabric dependency tree). Subsequent builds are cached.
+docker compose -f docker-compose.onprem-idemix.yml build
+docker compose -f docker-compose.onprem-idemix.yml up -d
+sleep 8   # Go binary loads + parses .bin files at startup; give it a moment
+docker compose -f docker-compose.onprem-idemix.yml ps
+# All 12 containers should be 'running' — now with idemix-verifier-0..7
+```
+
+> **Verify the startup parse succeeded:**
+> ```bash
+> docker compose -f docker-compose.onprem-idemix.yml logs idemix-verifier-0 | tail -5
+> # Expected: "Idemix worker idx=0 ready; startup verify OK" followed by
+> # "Idemix worker idx=0 listening on 'snark_queue:0'"
+> ```
+
+**On the k6 EC2:**
+```bash
+cd ~/zk-authaas && git pull && cd ~
+ulimit -n 65536
+
+k6 run \
+  -e TARGETS=$DOMAIN0_IP,$DOMAIN1_IP,$DOMAIN2_IP,$DOMAIN3_IP,$DOMAIN4_IP \
+  -e VUS=200 \
+  -e DURATION=100s \
+  -e ALG=idemix \
+  load_test_onprem.js \
+  --out csv=test_results_onprem_idemix.csv
+```
+
+> **Note on Idemix verify cost:** unlike U-Prove's pure-Python implementation,
+> Idemix here is a Go binary built against `hyperledger/fabric/idemix` — fully
+> implemented bilinear-pairing verification (BN256 curve). Expect per-verify
+> latency in the few-millisecond range, between SNARK (snarkjs) and U-Prove
+> (simplified pure-Python). Three points on the comparison curve.
+
+---
+
 ## Step 6 — Visualize and Compare
 
 Copy the CSV back and render the per-domain latency graph using the same visualiser as the service test.
 
 ```powershell
-# From your laptop — pull both CSVs back
+# From your laptop — pull all three CSVs back
 cd "E:\Work\VSCode Repo\ZK-AuthaaS Simulation"
-scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem.csv .
-scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem_uprove.csv .
+scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem.csv          .
+scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem_uprove.csv   .
+scp -i "zk-authaas-ec2-key.pem" ubuntu@<k6-public-ip>:~/test_results_onprem_idemix.csv   .
 
-python visualize_k6_per_app.py --input test_results_onprem.csv        --output onprem_snark_latency_graph.png
-python visualize_k6_per_app.py --input test_results_onprem_uprove.csv --output onprem_uprove_latency_graph.png
+python visualize_k6_per_app.py --input test_results_onprem.csv         --output onprem_snark_latency_graph.png
+python visualize_k6_per_app.py --input test_results_onprem_uprove.csv  --output onprem_uprove_latency_graph.png
+python visualize_k6_per_app.py --input test_results_onprem_idemix.csv  --output onprem_idemix_latency_graph.png
 ```
 
-You now have three graphs in identical style:
+You now have four graphs in identical style:
 - `latency_graph.png` (service model, from the earlier test)
 - `onprem_snark_latency_graph.png` (on-prem with SNARK verifier)
 - `onprem_uprove_latency_graph.png` (on-prem with U-Prove verifier)
+- `onprem_idemix_latency_graph.png` (on-prem with Idemix verifier)
 
 **Reading the comparison:**
 - During each hot-domain window, the on-prem graph should show that domain's line **rise visibly** (its 8 verifiers are now serving 60% of total traffic), while the cold-domain lines stay flat.
@@ -333,6 +387,7 @@ You now have three graphs in identical style:
 # On EACH domain EC2 (0..4) — bring down whichever stack is currently running:
 docker compose -f ~/zk-authaas/docker-compose.onprem.yml         down 2>/dev/null
 docker compose -f ~/zk-authaas/docker-compose.onprem-uprove.yml  down 2>/dev/null
+docker compose -f ~/zk-authaas/docker-compose.onprem-idemix.yml  down 2>/dev/null
 
 # Terminate all 6 EC2 instances (AWS Console or CLI):
 aws ec2 terminate-instances --instance-ids \

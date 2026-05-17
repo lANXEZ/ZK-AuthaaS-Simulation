@@ -1,0 +1,145 @@
+# Per-domain on-prem stack — IDEMIX variant.
+# Parallel to docker-compose.onprem.yml and docker-compose.onprem-uprove.yml:
+# the SNARK / U-Prove verifier containers are replaced with Idemix (Go) workers.
+# request-handler, selector, and Redis containers are identical.
+#
+# Run ONE copy on EACH of the 5 domain EC2s:
+#   docker compose -f docker-compose.onprem-idemix.yml build
+#   docker compose -f docker-compose.onprem-idemix.yml up -d
+
+services:
+
+  proof-queue:
+    image: redis:latest
+    cpus: 0.3
+    networks: [onprem-net]
+
+  snark-queue:
+    image: redis:latest
+    cpus: 0.3
+    networks: [onprem-net]
+
+  request-handler:
+    build:
+      context: .
+      dockerfile: Dockerfile.requesthandler
+    image: zk-authaas/request-handler:latest
+    cpus: 1.8
+    depends_on: [proof-queue]
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "python"
+      - "requestHandler.py"
+      - "--redis-host"
+      - "proof-queue"
+      - "--redis-port"
+      - "6379"
+    ports:
+      - "8000:8000"
+    networks: [onprem-net]
+
+  verifier-selector:
+    build:
+      context: .
+      dockerfile: Dockerfile.selector
+    image: zk-authaas/verifier-selector:latest
+    cpus: 0.6
+    depends_on: [proof-queue, snark-queue]
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "python"
+      - "verifierSelector.py"
+      - "--proof-host"
+      - "proof-queue"
+      - "--proof-port"
+      - "6379"
+      - "--snark-host"
+      - "snark-queue"
+      - "--snark-port"
+      - "6379"
+      - "--stark-host"
+      - "snark-queue"
+      - "--stark-port"
+      - "6379"
+      - "--snark-count"
+      - "8"
+      - "--stark-count"
+      - "0"
+      - "--routing"
+      - "roundrobin"
+      - "--snark-cost-weight"
+      - "1.0"
+      - "--stark-cost-weight"
+      - "1.0"
+    networks: [onprem-net]
+
+  # ------------------------------------------
+  # 8 Idemix verifiers. Same snark_queue:{N} routing as the other variants.
+  # The Go binary loads the proof + issuer/revocation keys once at startup
+  # from /app/idemix/*.bin (baked into the image).
+  # ------------------------------------------
+  idemix-verifier-0: &idemix-base
+    build:
+      context: .
+      dockerfile: Dockerfile.idemix
+    image: zk-authaas/idemix-verifier:latest
+    cpus: 1.1
+    depends_on: [snark-queue, proof-queue]
+    environment:
+      - TASK_SLOT=1
+    command:
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--index"
+      - "0"
+    networks: [onprem-net]
+
+  idemix-verifier-1:
+    <<: *idemix-base
+    environment:
+      - TASK_SLOT=2
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "1"]
+
+  idemix-verifier-2:
+    <<: *idemix-base
+    environment:
+      - TASK_SLOT=3
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "2"]
+
+  idemix-verifier-3:
+    <<: *idemix-base
+    environment:
+      - TASK_SLOT=4
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "3"]
+
+  idemix-verifier-4:
+    <<: *idemix-base
+    environment:
+      - TASK_SLOT=5
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "4"]
+
+  idemix-verifier-5:
+    <<: *idemix-base
+    environment:
+      - TASK_SLOT=6
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "5"]
+
+  idemix-verifier-6:
+    <<: *idemix-base
+    environment:
+      - TASK_SLOT=7
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "6"]
+
+  idemix-verifier-7:
+    <<: *idemix-base
+    environment:
+      - TASK_SLOT=8
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "7"]
+
+networks:
+  onprem-net:
+    driver: bridge
