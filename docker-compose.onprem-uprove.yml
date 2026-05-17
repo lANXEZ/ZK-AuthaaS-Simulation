@@ -77,11 +77,12 @@ services:
     networks: [onprem-net]
 
   # ------------------------------------------
-  # 8 U-Prove verifiers — same queue plumbing as the SNARK variant.
-  # The verifier-selector still routes via the "snark" scheme label
-  # (the k6 payload sends scheme=snark even in U-Prove mode — the label is
-  # just a routing hint, not a content type), so jobs land on snark_queue:N
-  # and our U-Prove workers consume them from there.
+  # 8 U-Prove verifiers — Microsoft U-Prove C# SDK (production-grade).
+  # Same queue plumbing as the SNARK / Idemix variants: the selector
+  # routes via the "snark" scheme label and jobs land on snark_queue:N.
+  # The proof bundle is baked into the image (uprove_proof_cs.json) and
+  # parsed once at startup; the C# SDK's PresentationProof.Verify() runs
+  # on every job from the queue.
   # ------------------------------------------
   uprove-verifier-0: &uprove-base
     build:
@@ -91,123 +92,51 @@ services:
     cpus: 1.1
     depends_on: [snark-queue, proof-queue]
     environment:
-      - PYTHONUNBUFFERED=1
       - TASK_SLOT=1
-    command:
-      - "python"
-      - "UProveVerifierWorker.py"
-      - "--redis-host"
-      - "snark-queue"
-      - "--proof-queue-host"
-      - "proof-queue"
-      - "--index"
-      - "0"
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "0"]
     networks: [onprem-net]
 
   uprove-verifier-1:
     <<: *uprove-base
     environment:
-      - PYTHONUNBUFFERED=1
       - TASK_SLOT=2
-    command:
-      - "python"
-      - "UProveVerifierWorker.py"
-      - "--redis-host"
-      - "snark-queue"
-      - "--proof-queue-host"
-      - "proof-queue"
-      - "--index"
-      - "1"
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "1"]
 
   uprove-verifier-2:
     <<: *uprove-base
     environment:
-      - PYTHONUNBUFFERED=1
       - TASK_SLOT=3
-    command:
-      - "python"
-      - "UProveVerifierWorker.py"
-      - "--redis-host"
-      - "snark-queue"
-      - "--proof-queue-host"
-      - "proof-queue"
-      - "--index"
-      - "2"
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "2"]
 
   uprove-verifier-3:
     <<: *uprove-base
     environment:
-      - PYTHONUNBUFFERED=1
       - TASK_SLOT=4
-    command:
-      - "python"
-      - "UProveVerifierWorker.py"
-      - "--redis-host"
-      - "snark-queue"
-      - "--proof-queue-host"
-      - "proof-queue"
-      - "--index"
-      - "3"
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "3"]
 
   uprove-verifier-4:
     <<: *uprove-base
     environment:
-      - PYTHONUNBUFFERED=1
       - TASK_SLOT=5
-    command:
-      - "python"
-      - "UProveVerifierWorker.py"
-      - "--redis-host"
-      - "snark-queue"
-      - "--proof-queue-host"
-      - "proof-queue"
-      - "--index"
-      - "4"
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "4"]
 
   uprove-verifier-5:
     <<: *uprove-base
     environment:
-      - PYTHONUNBUFFERED=1
       - TASK_SLOT=6
-    command:
-      - "python"
-      - "UProveVerifierWorker.py"
-      - "--redis-host"
-      - "snark-queue"
-      - "--proof-queue-host"
-      - "proof-queue"
-      - "--index"
-      - "5"
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "5"]
 
   uprove-verifier-6:
     <<: *uprove-base
     environment:
-      - PYTHONUNBUFFERED=1
       - TASK_SLOT=7
-    command:
-      - "python"
-      - "UProveVerifierWorker.py"
-      - "--redis-host"
-      - "snark-queue"
-      - "--proof-queue-host"
-      - "proof-queue"
-      - "--index"
-      - "6"
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "6"]
 
   uprove-verifier-7:
     <<: *uprove-base
     environment:
-      - PYTHONUNBUFFERED=1
       - TASK_SLOT=8
-    command:
-      - "python"
-      - "UProveVerifierWorker.py"
-      - "--redis-host"
-      - "snark-queue"
-      - "--proof-queue-host"
-      - "proof-queue"
-      - "--index"
-      - "7"
+    command: ["--redis-host", "snark-queue", "--proof-queue-host", "proof-queue", "--index", "7"]
 
 networks:
   onprem-net:

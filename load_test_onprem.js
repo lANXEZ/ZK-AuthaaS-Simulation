@@ -102,10 +102,9 @@ export const options = {
   },
 };
 
-// U-Prove bundle is loaded from disk at init time (k6 requires open() to be
-// at module top level — runtime open() inside default() is forbidden).
-// File expected next to this script on the k6 EC2.
-const UPROVE_BUNDLE = ALG === 'uprove' ? JSON.parse(open('./uprove_proof.json')) : null;
+// (U-Prove no longer needs a bundle in the k6 payload: the C# SDK worker
+//  has the proof + issuer params baked into its container image, same
+//  pattern as the Idemix Go worker. k6 sends a trivial trigger payload.)
 
 // Same valid groth16 proof as load_test.js
 const SNARK_PROOF = {
@@ -175,16 +174,13 @@ export default function (data) {
   // to 'snark' so they share the same queue plumbing. The worker container running
   // on each domain determines which algorithm actually verifies the proof.
   //
-  // For Idemix: the worker has the proof + issuer + revocation keys baked into its
-  // image (from idemix/*.bin), so k6's payload is a trivial trigger. This matches
-  // the SNARK/U-Prove pattern of "verify the same constant proof every request" —
-  // the only thing varying across the 3 algorithms is the verifier algorithm itself.
+  // For U-Prove (C# SDK) and Idemix: the worker has the proof bundle baked into
+  // its image, so k6's payload is a trivial trigger. This matches the SNARK
+  // pattern of "verify the same constant proof every request" — the only thing
+  // varying across the 3 algorithms is the verifier itself.
   let proofField;
   let publicInputsField;
-  if (ALG === 'uprove') {
-    proofField = UPROVE_BUNDLE;
-    publicInputsField = [];
-  } else if (ALG === 'idemix') {
+  if (ALG === 'uprove' || ALG === 'idemix') {
     proofField = {};
     publicInputsField = [];
   } else {

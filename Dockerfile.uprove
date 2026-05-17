@@ -1,10 +1,28 @@
-FROM python:3.11-slim
+# U-Prove verifier worker — Microsoft U-Prove C# SDK.
+# Replaces the previous pure-Python verifier with a production-grade
+# implementation. Multi-stage build: .NET 6 SDK for compile, .NET 6
+# runtime for execution.
+#
+# Bundle (uprove_proof_cs.json) is baked into the image so the worker
+# parses the proof once at startup and re-verifies the same SDK objects
+# on every job — same pattern as our SNARK / Idemix workers.
+#
+# Heads-up: first build pulls ~600 MB of .NET base images + restores
+# NuGet packages (Newtonsoft.Json, StackExchange.Redis, BouncyCastle
+# transitive). Subsequent builds hit the layer cache.
 
+FROM mcr.microsoft.com/dotnet/sdk:6.0 AS build
+WORKDIR /src
+COPY uprove-cs/ ./uprove-cs/
+# Restore + publish trimmed to the worker project; the SDK and BC
+# library are pulled in transitively via ProjectReference.
+RUN dotnet publish uprove-cs/Worker/UProveCsWorker.csproj \
+    -c Release \
+    -o /out \
+    --no-self-contained
+
+FROM mcr.microsoft.com/dotnet/runtime:6.0
 WORKDIR /app
-
-COPY uprove_verifier.py .
-COPY UProveVerifierWorker.py .
-
-RUN pip install --no-cache-dir redis==5.0.4
-
-CMD ["python", "UProveVerifierWorker.py"]
+COPY --from=build /out/ /app/
+COPY uprove-cs/Worker/uprove_proof_cs.json /app/uprove_proof_cs.json
+ENTRYPOINT ["dotnet", "/app/uprove-cs-worker.dll"]

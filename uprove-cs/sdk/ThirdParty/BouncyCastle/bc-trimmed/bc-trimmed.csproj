@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <RootNamespace>bc_trimmed</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CSharp" Version="4.7.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="AbstractECMultiplier.cs" />
+    <Compile Remove="Arrays.cs" />
+    <Compile Remove="BigIntegers.cs" />
+    <Compile Remove="DoubleAddMultiplier.cs" />
+    <Compile Remove="ECMultiplier.cs" />
+    <Compile Remove="ECPointMap.cs" />
+    <Compile Remove="LongArray.cs" />
+    <Compile Remove="Platform.cs" />
+    <Compile Remove="PreCompInfo.cs" />
+    <Compile Remove="ReferenceMultiplier.cs" />
+    <Compile Remove="WNafL2RMultiplier.cs" />
+    <Compile Remove="WNafPreCompInfo.cs" />
+    <Compile Remove="WNafUtilities.cs" />
+  </ItemGroup>
+</Project>

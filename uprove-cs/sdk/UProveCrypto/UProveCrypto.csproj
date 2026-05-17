@@ -1,0 +1,29 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+
+    <!-- suppress : warning CS1591: Missing XML comment for publicly visible type or member -->
+    <NoWarn>1591</NoWarn>
+
+    <!-- 
+      do not auto-generate \obj\Debug\net7.0\UProveCrypto.AssemblyInfo.cs as it will duplicate 
+      entries in \Properties\AssemblyInfo.cs
+    -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DefineConstants>TRACE;DEBUG;BOUNCY_CASTLE</DefineConstants>
+    <DocumentationFile>bin\Debug\UProveCrypto.XML</DocumentationFile>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DefineConstants>TRACE;BOUNCY_CASTLE</DefineConstants>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ThirdParty\BouncyCastle\bc-trimmed\bc-trimmed.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CSharp" Version="4.7.0" />
+  </ItemGroup>
+</Project>
