@@ -272,7 +272,7 @@ The request-handler, selector, and Redis containers are unchanged — only the
 ```bash
 cd ~/zk-authaas
 docker compose -f docker-compose.onprem.yml down
-git pull   # picks up uprove_verifier.py, UProveVerifierWorker.py, Dockerfile.uprove, docker-compose.onprem-uprove.yml
+git pull   # picks up uprove-cs/ (SDK + Worker), Dockerfile.uprove, docker-compose.onprem-uprove.yml
 docker compose -f docker-compose.onprem-uprove.yml build
 docker compose -f docker-compose.onprem-uprove.yml up -d
 sleep 5
@@ -348,11 +348,13 @@ k6 run \
   --out csv=test_results_onprem_idemix.csv
 ```
 
-> **Note on Idemix verify cost:** unlike U-Prove's pure-Python implementation,
-> Idemix here is a Go binary built against `hyperledger/fabric/idemix` — fully
-> implemented bilinear-pairing verification (BN256 curve). Expect per-verify
-> latency in the few-millisecond range, between SNARK (snarkjs) and U-Prove
-> (simplified pure-Python). Three points on the comparison curve.
+> **Note on Idemix verify cost:** the Idemix worker is a Go binary built
+> against `hyperledger/fabric/idemix` with fully-implemented bilinear-pairing
+> verification (BN256 curve). U-Prove uses the official Microsoft C# SDK
+> (`UProveCrypto`, .NET 6) for spec-compliant verification, and SNARK uses
+> snarkjs (Groth16/BN128). All three are production-grade libraries, so
+> per-verify cost differences reflect the algorithms themselves rather than
+> implementation language or completeness.
 
 ---
 
