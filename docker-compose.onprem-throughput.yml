@@ -1,0 +1,269 @@
+# Track 4 — per-domain on-prem stack for the throughput-scalability sweep.
+# Run ONE copy of this compose on EACH of the 5 domain EC2s.
+#
+# Same architecture as docker-compose.onprem.yml (Track 3) but the verifier
+# count and CPU limits change per round via env files + compose profiles:
+#
+#   Round 1 (2.0 vCPU/domain):  1 verifier — no profile flag needed
+#     docker compose --env-file onprem-throughput-round1.env -f docker-compose.onprem-throughput.yml up -d
+#   Round 2 (4.0 vCPU/domain):  3 verifiers
+#     docker compose --env-file onprem-throughput-round2.env --profile r2 -f docker-compose.onprem-throughput.yml up -d
+#   Round 3 (8.0 vCPU/domain):  6 verifiers
+#     docker compose --env-file onprem-throughput-round3.env --profile r3 -f docker-compose.onprem-throughput.yml up -d
+#   Round 4 (12.0 vCPU/domain): 9 verifiers
+#     docker compose --env-file onprem-throughput-round4.env --profile r4 -f docker-compose.onprem-throughput.yml up -d
+#
+# ALWAYS tear down with the largest profile so every verifier is caught:
+#   docker compose --profile r4 -f docker-compose.onprem-throughput.yml down
+#
+# Verifiers are 1.0 vCPU each (not 1.1 as in Track 3) so that verifier
+# count == verifier vCPUs, matching the E2E side exactly.
+# Defaults (no env file) = round 4 (12 vCPU/domain).
+
+services:
+
+  # ------------------------------------------
+  # Local Redis brokers
+  # ------------------------------------------
+  proof-queue:
+    image: redis:latest
+    cpus: ${REDIS_CPUS:-0.25}
+    networks: [onprem-net]
+
+  snark-queue:
+    image: redis:latest
+    cpus: ${REDIS_CPUS:-0.25}
+    networks: [onprem-net]
+
+  # ------------------------------------------
+  # Request handler — k6's entry point for this domain
+  # ------------------------------------------
+  request-handler:
+    build:
+      context: .
+      dockerfile: Dockerfile.requesthandler
+    image: zk-authaas/request-handler:latest
+    cpus: ${HANDLER_CPUS:-1.8}
+    depends_on: [proof-queue]
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "python"
+      - "requestHandler.py"
+      - "--redis-host"
+      - "proof-queue"
+      - "--redis-port"
+      - "6379"
+    ports:
+      - "8000:8000"
+    networks: [onprem-net]
+
+  # ------------------------------------------
+  # Verifier selector — round-robin across THIS round's verifier count.
+  # SNARK_COUNT comes from the round env file and MUST match the number
+  # of verifier containers enabled by the profile (1 / 3 / 6 / 9).
+  # ------------------------------------------
+  verifier-selector:
+    build:
+      context: .
+      dockerfile: Dockerfile.selector
+    image: zk-authaas/verifier-selector:latest
+    cpus: ${SELECTOR_CPUS:-0.7}
+    depends_on: [proof-queue, snark-queue]
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "python"
+      - "verifierSelector.py"
+      - "--proof-host"
+      - "proof-queue"
+      - "--proof-port"
+      - "6379"
+      - "--snark-host"
+      - "snark-queue"
+      - "--snark-port"
+      - "6379"
+      - "--stark-host"
+      - "snark-queue"   # unused but required; point at any reachable Redis
+      - "--stark-port"
+      - "6379"
+      - "--snark-count"
+      - "${SNARK_COUNT:-9}"
+      - "--stark-count"
+      - "0"
+      - "--routing"
+      - "roundrobin"
+      - "--snark-cost-weight"
+      - "1.0"
+      - "--stark-cost-weight"
+      - "1.0"
+    networks: [onprem-net]
+
+  # ------------------------------------------
+  # SNARK verifiers — up to 9, enabled per round via profiles:
+  #   verifier 0      : always on (every round)
+  #   verifiers 1–2   : rounds 2, 3, 4   (profile r2/r3/r4)
+  #   verifiers 3–5   : rounds 3, 4      (profile r3/r4)
+  #   verifiers 6–8   : round 4 only     (profile r4)
+  # ------------------------------------------
+  snark-verifier-0: &snark-base
+    build:
+      context: .
+      dockerfile: Dockerfile.snark
+    image: zk-authaas/snark-verifier:latest
+    cpus: 1.0
+    depends_on: [snark-queue, proof-queue]
+    environment:
+      - TASK_SLOT=1
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "0"
+    networks: [onprem-net]
+
+  snark-verifier-1:
+    <<: *snark-base
+    profiles: ["r2", "r3", "r4"]
+    environment:
+      - TASK_SLOT=2
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "1"
+
+  snark-verifier-2:
+    <<: *snark-base
+    profiles: ["r2", "r3", "r4"]
+    environment:
+      - TASK_SLOT=3
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "2"
+
+  snark-verifier-3:
+    <<: *snark-base
+    profiles: ["r3", "r4"]
+    environment:
+      - TASK_SLOT=4
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "3"
+
+  snark-verifier-4:
+    <<: *snark-base
+    profiles: ["r3", "r4"]
+    environment:
+      - TASK_SLOT=5
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "4"
+
+  snark-verifier-5:
+    <<: *snark-base
+    profiles: ["r3", "r4"]
+    environment:
+      - TASK_SLOT=6
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "5"
+
+  snark-verifier-6:
+    <<: *snark-base
+    profiles: ["r4"]
+    environment:
+      - TASK_SLOT=7
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "6"
+
+  snark-verifier-7:
+    <<: *snark-base
+    profiles: ["r4"]
+    environment:
+      - TASK_SLOT=8
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "7"
+
+  snark-verifier-8:
+    <<: *snark-base
+    profiles: ["r4"]
+    environment:
+      - TASK_SLOT=9
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--mode"
+      - "onprem"
+      - "--index"
+      - "8"
+
+networks:
+  onprem-net:
+    driver: bridge

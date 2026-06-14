@@ -1,0 +1,246 @@
+version: '3.8'
+
+# ==========================================
+# ZK-AuthaaS Throughput-Scalability E2E Stack (Track 4)
+# ==========================================
+# Same pipeline as docker-compose.yml (Track 2) with two differences:
+#
+#   1. SNARK-only — stark-queue and stark-verifier are removed entirely.
+#   2. EVERY service carries an explicit CPU limit. The per-round total
+#      vCPU budget (10/20/40/60) is enforced by container limits, not by
+#      instance sizes — the EC2s stay fixed across all four rounds.
+#
+# Replica counts and CPU limits are parameterized via environment
+# variables, loaded from e2e-throughput-round{1..4}.env before deploying:
+#
+#   export APP0_IP=... APP1_IP=... APP2_IP=... APP3_IP=... APP4_IP=...
+#   set -a; source e2e-throughput-round1.env; set +a
+#   docker stack deploy -c docker-compose.e2e-throughput.yml zk
+#
+# Defaults (deploying without an env file) = round 4 (60-vCPU budget).
+#
+# NOTE: the five token-validator containers (on the App EC2s) are part of
+# the budget too, but they run outside this stack. Their per-round cap is
+# applied with `docker update --cpus=$VALIDATOR_CPUS` on each App EC2 —
+# see AWS_Throughput_Scalability_Test_Setup_Checklist.md.
+
+services:
+
+  # ------------------------------------------
+  # Shared Redis brokers (3 — no stark-queue in this track)
+  # ------------------------------------------
+  proof-queue:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '${REDIS_CPUS:-0.3}'
+    networks:
+      - zk-net
+
+  snark-queue:
+    image: redis:latest
+    ports:
+      - "6380:6379"
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '${REDIS_CPUS:-0.3}'
+    networks:
+      - zk-net
+
+  token-queue:
+    image: redis:latest
+    ports:
+      - "6382:6379"
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '${REDIS_CPUS:-0.3}'
+    networks:
+      - zk-net
+
+  # ------------------------------------------
+  # Request Handler (FastAPI) — replicas + cpus vary per round
+  # ------------------------------------------
+  request-handler:
+    build:
+      context: .
+      dockerfile: Dockerfile.requesthandler
+    image: zk-authaas/request-handler:latest
+    depends_on:
+      - proof-queue
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["python", "requestHandler.py", "--redis-host", "proof-queue", "--redis-port", "6379"]
+    deploy:
+      replicas: ${HANDLER_REPLICAS:-8}
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '${HANDLER_CPUS:-0.75}'
+    networks:
+      - zk-net
+
+  # ------------------------------------------
+  # Verifier Selector — --snark-count MUST equal SNARK_REPLICAS
+  # (both come from the same round env file, so keep them in sync there)
+  # ------------------------------------------
+  verifier-selector:
+    build:
+      context: .
+      dockerfile: Dockerfile.selector
+    image: zk-authaas/verifier-selector:latest
+    depends_on:
+      - proof-queue
+      - snark-queue
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "python"
+      - "verifierSelector.py"
+      - "--proof-host"
+      - "proof-queue"
+      - "--proof-port"
+      - "6379"
+      - "--snark-host"
+      - "snark-queue"
+      - "--snark-port"
+      - "6379"
+      - "--stark-host"
+      - "snark-queue"   # unused but required; point at any reachable Redis
+      - "--stark-port"
+      - "6379"
+      - "--snark-count"
+      - "${SNARK_COUNT:-45}"
+      - "--stark-count"
+      - "0"
+      - "--routing"
+      - "weighted"
+      - "--snark-cost-weight"
+      - "1.0"
+      - "--stark-cost-weight"
+      - "1.0"
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '${SELECTOR_CPUS:-1.0}'
+    networks:
+      - zk-net
+
+  # ------------------------------------------
+  # SNARK verifier pool — THE swept variable: 5 / 15 / 30 / 45 replicas.
+  # Always 1.0 vCPU each so verifier count == verifier vCPUs.
+  # ------------------------------------------
+  snark-verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile.snark
+    image: zk-authaas/snark-verifier:latest
+    depends_on:
+      - snark-queue
+      - proof-queue
+      - token-queue
+    environment:
+      # Swarm substitutes the 1-based slot number into this env var;
+      # the worker converts it to a 0-based index internally.
+      - TASK_SLOT={{.Task.Slot}}
+    command:
+      - "node"
+      - "SNARKVerifierWorker.js"
+      - "--redis-host"
+      - "snark-queue"
+      - "--redis-port"
+      - "6379"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--proof-queue-port"
+      - "6379"
+      - "--token-queue-host"
+      - "token-queue"
+      - "--token-queue-port"
+      - "6379"
+    deploy:
+      replicas: ${SNARK_REPLICAS:-45}
+      placement:
+        constraints:
+          - node.labels.pool == snark
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 384M
+    networks:
+      - zk-net
+
+  # ------------------------------------------
+  # Token Issuance Worker — replicas + cpus vary per round.
+  # Set APP0_IP..APP4_IP in your shell before deploying.
+  # ------------------------------------------
+  token-issuer:
+    build:
+      context: .
+      dockerfile: Dockerfile.token-issuer
+    image: zk-authaas/token-issuer:latest
+    depends_on:
+      - token-queue
+      - proof-queue
+    environment:
+      - PYTHONUNBUFFERED=1
+    command:
+      - "--token-queue-host"
+      - "token-queue"
+      - "--token-queue-port"
+      - "6379"
+      - "--proof-queue-host"
+      - "proof-queue"
+      - "--proof-queue-port"
+      - "6379"
+      - "--private-key-path"
+      - "/etc/zk-authaas/zk-authaas-key.pem"
+      - "--app-urls"
+      - "http://${APP0_IP:-127.0.0.1}:9000/ingest,http://${APP1_IP:-127.0.0.1}:9000/ingest,http://${APP2_IP:-127.0.0.1}:9000/ingest,http://${APP3_IP:-127.0.0.1}:9000/ingest,http://${APP4_IP:-127.0.0.1}:9000/ingest"
+      - "--token-ttl"
+      - "3600"
+    volumes:
+      - ./zk-authaas-key.pem:/etc/zk-authaas/zk-authaas-key.pem:ro
+    deploy:
+      replicas: ${ISSUER_REPLICAS:-4}
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '${ISSUER_CPUS:-0.6}'
+          memory: 256M
+    networks:
+      - zk-net
+
+networks:
+  zk-net:
+    driver: overlay
+    attachable: true
+    ipam:
+      config:
+        - subnet: 10.1.0.0/20   # avoid 10.0.x.x which overlaps Swarm's ingress network

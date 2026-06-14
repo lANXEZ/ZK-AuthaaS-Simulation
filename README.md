@@ -12,15 +12,18 @@ The cryptographic primitives are real, not mocked:
 
 ## Experiment tracks
 
-The repository supports three independent AWS deployments, each with its own checklist. They are designed to be runnable in any order.
+The repository supports four independent AWS deployments, each with its own checklist. They are designed to be runnable in any order.
 
 | Track | Topology | Checklist | What it measures |
 |---|---|---|---|
 | **1. Verifier-selector study** | 3 EC2s (manager + worker + k6) | [`AWS_Spot_Swarm_Setup_Checklist.md`](AWS_Spot_Swarm_Setup_Checklist.md) | Cost-weighted scheduling vs. round-robin under controlled load. The original load-aware selector experiment. |
 | **2. End-to-end service deployment** | 8 EC2s (manager + worker + 5 apps + k6) | [`AWS_E2E_Test_Setup_Checklist.md`](AWS_E2E_Test_Setup_Checklist.md) | The full ZK-AuthaaS service pipeline with token issuance + per-app validation under a five-phase shifting-focus workload. |
 | **3. On-prem comparison** | 6 EC2s (5 domains + k6) × 3 algorithms | [`AWS_OnPrem_Test_Setup_Checklist.md`](AWS_OnPrem_Test_Setup_Checklist.md) | Each domain runs its own self-contained stack — no pooling, no token issuer. Repeated with SNARK, U-Prove (C# SDK), and Idemix (Go) verifiers. Paired head-to-head with Track 2 under the same ~60-vCPU total budget. |
+| **4. Throughput scalability sweep** | Track 2 + Track 3 topologies, two sessions | [`AWS_Throughput_Scalability_Test_Setup_Checklist.md`](AWS_Throughput_Scalability_Test_Setup_Checklist.md) | Paired service-vs-on-prem **throughput** at four total-vCPU budgets (10/20/40/60). Per-round knee-VU shifting-focus runs, per-domain throughput graphs, and a throughput-vs-vCPU scaling curve. |
 
 Tracks 2 and 3 are designed as a paired head-to-head: same shifting-focus workload, same VU=200, same ~60-vCPU total budget. The only difference is whether verification is **pooled centrally with token issuance** (Track 2) or **replicated per domain in isolation** (Track 3). This pairing is the central evidence for the service-oriented architecture.
+
+Track 4 extends the same pairing along the **budget axis** to measure throughput scalability: both architectures get an identical total vCPU budget and an identical number of 1.0-vCPU SNARK verifiers per round (5/15/30/45 pooled vs 1/3/6/9 per domain), enforced by per-container CPU limits rather than instance sizes. Each round, a VU sweep on the service system finds that budget's saturation knee, and both systems then run the shifting-focus workload at that knee VU.
 
 The rest of this README documents Track 1 in detail (the cost-weighted selector study). For Tracks 2 and 3, follow the linked checklists end-to-end.
 
@@ -502,6 +505,19 @@ This causes ffjavascript to spawn only 1 worker thread per container, making `At
 | `idemix/` | Idemix Go worker: `IdemixVerifierWorker.go`, `go.mod`, plus `idemix_proof.bin`, `issuer_public_key.bin`, `revocation_public_key.bin` |
 | `Dockerfile.idemix` | Multi-stage build: `golang:1.21-bookworm` → `debian:bookworm-slim` |
 | `AWS_OnPrem_Test_Setup_Checklist.md` | Full step-by-step deployment guide (covers all three algorithms) |
+
+### Track 4 — Throughput scalability sweep
+
+| File | Role |
+|---|---|
+| `docker-compose.e2e-throughput.yml` | Track 2 stack, SNARK-only, with CPU limits on **every** service; replicas + limits parameterized via env vars |
+| `e2e-throughput-round{1..4}.env` | Per-round E2E budget allocations (10/20/40/60 vCPU total) — `set -a; source …; set +a` before `docker stack deploy` |
+| `docker-compose.onprem-throughput.yml` | Track 3 per-domain stack with up to 9 × 1.0-vCPU verifiers, enabled per round via compose profiles (`--profile r2/r3/r4`) |
+| `onprem-throughput-round{1..4}.env` | Per-round per-domain budget allocations (2/4/8/12 vCPU per domain) — pass via `--env-file` |
+| `load_test.js`, `load_test_onprem.js` | Reused unchanged — the `completed_by_domain` counter (tagged `domain=N`) is the throughput source |
+| `visualize_k6_throughput_per_app.py` | Per-domain completions/s over time — throughput twin of the Track 2/3 latency graph, same colors + focus markers |
+| `visualize_throughput_scaling.py` | The headline graph: total + hot-domain throughput vs vCPU budget, service vs on-prem |
+| `AWS_Throughput_Scalability_Test_Setup_Checklist.md` | Full step-by-step guide (both sessions, all four rounds) |
 
 ---
 
