@@ -65,6 +65,19 @@ Estimated spot cost: Part A ≈ $1.3/hr × ~6 hr ≈ **$8**, Part B ≈ $0.75/hr
 
 ---
 
+## A note on where each command runs (`bash` vs `powershell`)
+
+Code blocks are fenced by **where you type them**, because this repo is driven from a Windows laptop:
+
+- ` ```bash ` blocks run **on an EC2 instance** (Ubuntu) — *after* you `ssh` in. Copy them into that remote shell as-is.
+- ` ```powershell ` blocks run **on your Windows laptop** (the `PS C:\...>` prompt). These are the `scp` copy-backs, the `python` visualizers, and the two SSH loops that apply validator CPU caps.
+
+If you paste a `bash` `for ... do ... done` loop straight into PowerShell you'll get `Missing opening '(' after keyword 'for'` — that loop was meant for an EC2 shell, or (for the laptop-side validator-cap loops) has already been rewritten in PowerShell `foreach` form below.
+
+**One Windows-specific gotcha:** when a laptop-side `ssh` command carries a remote command string, keep that string **single-quoted with no inner double quotes**. Windows PowerShell 5.1 strips embedded `"` when passing arguments to a native `.exe`, which silently mangles the remote command (e.g. a `docker inspect -f "… {{.Field}}"` format string gets split into separate arguments and fails with `no such object`). The loops below are already written this way.
+
+---
+
 # Part A — Service (E2E) session
 
 ## Step A1 — Launch and base setup
@@ -124,14 +137,23 @@ docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK | xargs 
 
 Apply the round's CPU cap to the 5 app validators (they run outside the Swarm stack, so the limit is applied directly to the running container — `VALIDATOR_CPUS` is in the same env file):
 
-```bash
-# From your laptop, for each App EC2 public IP:
-for HOST in <app0-pub> <app1-pub> <app2-pub> <app3-pub> <app4-pub>; do
-  ssh -i zk-authaas-ec2-key.pem ubuntu@$HOST \
-    "docker update --cpus=0.4 \$(docker ps -qf name=token-validator) && \
-     docker inspect -f 'validator NanoCpus: {{.HostConfig.NanoCpus}}' \$(docker ps -qf name=token-validator)"
-done
-# NanoCpus must print 400000000 (= 0.4 vCPU)
+```powershell
+# From your laptop (PowerShell), for each App EC2 public IP.
+# NOTE 1: do not use $HOST as the loop variable — it is a PowerShell automatic
+#         variable. Use $APP (or any other name).
+# NOTE 2: the remote command has NO inner double quotes on purpose. Windows
+#         PowerShell 5.1 strips embedded " when handing an argument to a native
+#         .exe (ssh), which would split the docker inspect format string and
+#         produce "no such object" errors. The bare {{...}} template has no
+#         spaces, so bash on the EC2 accepts it unquoted.
+# The single-quoted string is passed to the EC2's bash verbatim (so $(...) and
+# && run there, not locally).
+foreach ($APP in @("<app0-pub>","<app1-pub>","<app2-pub>","<app3-pub>","<app4-pub>")) {
+  Write-Host "=== $APP ==="
+  ssh -i zk-authaas-ec2-key.pem ubuntu@$APP `
+    'docker update --cpus=0.4 $(docker ps -qf name=token-validator) && docker inspect -f {{.HostConfig.NanoCpus}} $(docker ps -qf name=token-validator)'
+}
+# Each host prints its container id, then 400000000 (= 0.4 vCPU)
 ```
 
 > ⚠️ `docker update` survives container restarts but is **reset by `docker compose up`** — if you ever re-run compose on an App EC2, re-apply the cap.
@@ -163,13 +185,13 @@ TASK=$(docker service ps zk_verifier-selector --filter "desired-state=running" -
 docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK | xargs docker logs 2>&1 | head -3
 ```
 
-```bash
-# From laptop: re-apply validator caps with the round's VALIDATOR_CPUS
-# (0.4 / 0.32 / 0.84 / 0.94 for rounds 1/2/3/4):
-for HOST in <app0-pub> <app1-pub> <app2-pub> <app3-pub> <app4-pub>; do
-  ssh -i zk-authaas-ec2-key.pem ubuntu@$HOST \
-    "docker update --cpus=<VALIDATOR_CPUS> \$(docker ps -qf name=token-validator)"
-done
+```powershell
+# From your laptop (PowerShell): re-apply validator caps with the round's
+# VALIDATOR_CPUS (0.4 / 0.32 / 0.84 / 0.94 for rounds 1/2/3/4):
+foreach ($APP in @("<app0-pub>","<app1-pub>","<app2-pub>","<app3-pub>","<app4-pub>")) {
+  ssh -i zk-authaas-ec2-key.pem "ubuntu@$APP" `
+    'docker update --cpus=<VALIDATOR_CPUS> $(docker ps -qf name=token-validator)'
+}
 ```
 
 ### A3b — VU sweep → record KNEE_VU_R
