@@ -25,17 +25,18 @@
 
 ## The round table
 
-| Round | Total budget | E2E verifier pool | On-prem verifiers/domain | Overhead budget | Expected verify ceiling¹ | Expected `KNEE_VU`² |
+| Round | Total budget | E2E verifier pool | On-prem verifiers/domain | E2E overhead | E2E issuer replicas | Expected E2E throughput¹ |
 |---|---|---|---|---|---|---|
-| 1 | 10 vCPU | 5 | 1 | 5.0 | ~115/s | ~70 |
-| 2 | 20 vCPU | 15 | 3 | 5.0 | ~345/s | ~210 |
-| 3 | 40 vCPU | 30 | 6 | 10.0 | ~690/s | ~420 |
-| 4 | 60 vCPU | 45 | 9 | 15.0 | ~1035/s | ~630 |
+| 1 | 10 vCPU | 5 | 1 | 5.0 | 2 | ~210/s (verifier-limited) |
+| 2 | 20 vCPU | 15 | 3 | 5.0 | 2 | ~410/s (token-pipeline-limited) |
+| 3 | 40 vCPU | 30 | 6 | 10.0 | 4 | ~880/s |
+| 4 | 60 vCPU | 45 | 9 | 15.0 | 6 | ~1280/s |
 
-¹ verifier count × ~23 verifies/s per 1.0-vCPU snarkjs worker (Track 1 measurement).
-² rule of thumb ~14 VUs per verifier, extrapolated from Track 2 (32 workers → knee ≈ 450). Your sweep decides the real value.
+¹ Empirical, post-rebalance. The measured per-verifier rate on the c5.12xlarge worker is ~42/s (not the README's conservative 23/s), so 5/15/30/45 verifiers could in principle do ~210/630/1260/1890. But from round 2 on, the **token-issuer (RS256 signing) is the binding constraint** — see the rebalance note below. Your per-round sweep decides the real knee.
 
-The exact per-service CPU splits live in the 8 env files (`e2e-throughput-round{1..4}.env`, `onprem-throughput-round{1..4}.env`) — each file has its allocation table in a header comment. They are a starting proposal: if the Step A9b capacity check shows the plumbing saturating before the verifiers, rebalance that round's env file and re-run.
+> 🔬 **Why the overhead is issuer-heavy (rounds 2–4 rebalanced 2026-06).** A `docker stats` capture at 500 VU on round 4 showed all token-issuer replicas pinned at their CPU cap while the verifier-selector (~33%), request-handlers (~43% of cap), and token-validators (~6%) all had headroom. RS256 JWT signing is the service model's real cost. The env files now move the wasted validator budget into more issuer replicas (and keep the request-handler matched so it doesn't just become the next wall), holding verifiers and the total budget fixed. The on-prem side has **no token-issuer**, so it pays none of this — which is exactly why the service's edge shows up in the **hot-domain** comparison (pooling under skew), not necessarily in raw total throughput.
+
+The exact per-service CPU splits live in the 8 env files (`e2e-throughput-round{1..4}.env`, `onprem-throughput-round{1..4}.env`) — each file has its allocation table in a header comment. After each round's sweep, run the Step A3b capacity check; if a *different* component is now pinned (handler, or validators during a domain's hot window), shift a few tenths in that round's env file and re-sweep.
 
 > ⚠️ **Round 4 is NOT a re-run of the Track 2/3 configuration.** It uses 45 pooled / 9-per-domain verifiers at 1.0 vCPU (vs 32 / 8×1.1) so the series stays internally consistent. Don't mix its numbers with the latency test's.
 
@@ -225,7 +226,7 @@ docker inspect $(docker ps -qf name=zk_token-issuer | head -1) --format '{{json 
 # VALIDATOR_CPUS. Set the value ONCE on the first line — do not leave a
 # <placeholder> inside the ssh command (bash would read <NAME> as a file
 # redirection and fail with "No such file or directory").
-$VALIDATOR_CPUS = "0.32"   # round value: 0.4 / 0.32 / 0.84 / 0.94 for R1/R2/R3/R4
+$VALIDATOR_CPUS = "0.15"   # round value: 0.4 / 0.15 / 0.3 / 0.5 for R1/R2/R3/R4
 foreach ($APP in @("<app0-pub>","<app1-pub>","<app2-pub>","<app3-pub>","<app4-pub>")) {
   # Double-quoted so $VALIDATOR_CPUS expands locally; `$(...) is escaped so the
   # container-id lookup runs on the EC2's bash, not in PowerShell.
@@ -292,7 +293,13 @@ rather skip the graph.)
 | 3 | 40 | ______ | ______ /s |
 | 4 | 60 | ______ | ______ /s |
 
-> ✅ **Capacity check (do not skip):** the peak throughput at the knee should be roughly `verifier_count × 23/s` (≈ 115 / 345 / 690 / 1035). If it plateaus well below ~80 % of that, the verifiers are NOT the bottleneck — something in the overhead allocation (usually the request-handler) is saturating first, and the round's measurement would be invalid. Check `docker stats` on the manager during load: any management container pinned at exactly its `cpus` limit is the culprit. Rebalance that round's env file (shift CPU from an idle service to the pinned one), redeploy, and re-sweep. Rounds 2 and 3 have the tightest handler allocations — watch them closely.
+> ✅ **Capacity check (do not skip):** during a sustained run at the knee, take a `docker stats` snapshot on the manager and on an app EC2 (CPUPerc is per-core, so compare each container to its own `cpus` cap). In the **rebalanced** config the **token-issuer and request-handler should both sit near their caps** (they're matched), while the selector, Redis, and validators have headroom — that's a healthy, well-balanced round. If instead *one* component is pinned and the rest are idle, shift a few tenths of a vCPU in that round's env file toward the pinned service (taking it from whatever's idle, keeping the round total fixed), redeploy, and re-sweep. Watch the **validators during a domain's hot window** — each one carries 60 % of traffic in turn, so a validator cap that looks fine under uniform load can pin during its hot phase.
+>
+> ```bash
+> # Manager, during the knee load:
+> docker stats --no-stream --format "{{.Name}}\t{{.CPUPerc}}"
+> # token-issuer & request-handler near cap = balanced; one pinned + rest idle = rebalance
+> ```
 
 ### A3c — Shifting-focus throughput run at KNEE_VU_R
 
@@ -437,23 +444,31 @@ The script also prints a summary table that additionally reports each round's **
 
 ---
 
-## Expected results (rough targets)
+## Expected results (rough targets, post-rebalance)
 
-| Round | Budget | E2E total c/s | On-prem total c/s | On-prem hot-domain ceiling |
+| Round | Budget | E2E total c/s¹ | E2E binding constraint | On-prem hot-domain ceiling² |
 |---|---|---|---|---|
-| 1 | 10 | ~115 | < 115 (hot domain capped at ~23) | 1 × 23/s |
-| 2 | 20 | ~345 | lower | 3 × 23 ≈ 69/s |
-| 3 | 40 | ~690 | lower | 6 × 23 ≈ 138/s |
-| 4 | 60 | ~1035 | lower | 9 × 23 ≈ 207/s |
+| 1 | 10 | ~210 | verifiers (5) | 1 × ~42 ≈ 42/s |
+| 2 | 20 | ~410 | token pipeline (issuer+handler) | 3 × ~42 ≈ 126/s |
+| 3 | 40 | ~880 | token pipeline | 6 × ~42 ≈ 252/s |
+| 4 | 60 | ~1280 | token pipeline | 9 × ~42 ≈ 378/s |
 
-The thesis this test proves: with **identical budgets and identical verifier cores**, the service architecture converts vCPU into usable throughput more efficiently under skewed (realistic) load — and the advantage persists or widens as the budget scales, because pooling lets the entire pool chase whichever domain is hot.
+¹ Empirical estimates after moving idle validator budget into the token-issuer. Verify each with the sweep + the A3b capacity check.
+² On-prem has no token-issuer, so each domain is verifier-limited; the hot domain caps at its own 1/3/6/9 workers × ~42/s.
+
+The thesis this test proves: under **skewed** (realistic) load the service architecture pools its entire verifier set against whichever domain is hot, so its **hot-domain throughput** keeps climbing with the budget, while on-prem strands 60 % of traffic on one domain's fraction of the workers. On raw *uniform* total throughput the service pays a token-issuance tax on-prem doesn't — so the headline lives in the **hot-domain** comparison and the shifting-focus runs, where pooling wins.
+
+> ⚠️ **The round 2–4 env files were rebalanced (issuer-heavy) after the bottleneck analysis.** Any E2E sweep/run done *before* that rebalance (the old ~388/528/580 numbers) is stale — **re-sweep rounds 2, 3, and 4** with the current env files. Round 1 is verifier-limited and unchanged, so its existing sweep stands.
 
 ---
 
 ## Troubleshooting
 
-**E2E knee throughput lands far below `verifiers × 23/s`.**
-Overhead bottleneck — see the capacity check in A3b. `docker stats` on the manager; whichever container sits pinned at its `cpus` limit needs more budget in that round's env file. Take it from a service showing low utilisation, keep the round total constant, redeploy, re-sweep.
+**E2E throughput plateaus well below the verifier capacity (verifiers × ~42/s).**
+The token pipeline is the bottleneck, not the verifiers. Run `docker stats` on the manager during load: in the rebalanced config the **token-issuer** (RS256 signing) and **request-handler** should both be near their caps — that's expected and is the service model's real ceiling. If only *one* is pinned and others are idle, shift budget toward it in that round's env file (keep the total fixed) and re-sweep. The token-issuer scales by **replica count** (signing is single-threaded per process), so add `ISSUER_REPLICAS`, not just `ISSUER_CPUS`.
+
+**A validator pins only during one phase of the shifting-focus run.**
+Each domain takes its turn as the hot domain (60 % of traffic), so a `VALIDATOR_CPUS` that's fine under uniform load can saturate during that domain's 20 s window. Raise `VALIDATOR_CPUS` for that round (it's applied to all five, since the hot role rotates).
 
 **`docker stack deploy` warns about undefined variables / selector starts with snark-count=45 in round 1.**
 The env file wasn't sourced into the deploying shell. Run `set -a; source e2e-throughput-round<R>.env; set +a` and redeploy. (Defaults in the compose file are round-4 values.)

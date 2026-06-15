@@ -226,7 +226,7 @@ services:
     volumes:
       - ./zk-authaas-key.pem:/etc/zk-authaas/zk-authaas-key.pem:ro
     deploy:
-      replicas: ${ISSUER_REPLICAS:-4}
+      replicas: ${ISSUER_REPLICAS:-6}
       placement:
         constraints:
           - node.role == manager
