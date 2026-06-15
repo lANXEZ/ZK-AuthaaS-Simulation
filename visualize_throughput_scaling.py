@@ -3,15 +3,18 @@ Throughput-vs-vCPU scaling curve for Track 4 — the headline graph of the
 throughput-scalability sweep.
 
 Takes the 4 E2E (service) CSVs and the 4 on-prem CSVs — one per vCPU
-budget round — and plots two panels:
+budget round — and plots a single graph:
 
-  Left:  TOTAL system throughput vs total vCPU budget
-  Right: HOT-DOMAIN throughput vs total vCPU budget — the average
-         completions/s a domain sustains during its own 20 s hot window
-         (when it receives 60% of traffic). This is where pooled vs
-         partitioned verifiers diverge hardest.
+  Average (total system) throughput vs total vCPU budget. At each budget
+  (10/20/40/60) there are two dots — Service (E2E, blue circle) and
+  On-prem (red square) — so the head-to-head gap is readable per round.
+  Throughput = all completed verifications across the 5 domains divided
+  by the run duration. Dots only, no connecting lines.
 
-Each panel has two lines: Service (E2E) and On-prem.
+The printed summary table additionally reports each round's HOT-DOMAIN
+throughput (the avg completions/s a domain sustains during its own 20 s
+60%-of-traffic window) and the service/on-prem ratios — the quotable
+scalability numbers — even though only total throughput is plotted.
 
 Usage:
   python visualize_throughput_scaling.py \
@@ -99,35 +102,38 @@ def analyze_csv(path: Path) -> dict:
 # Plot
 # --------------------------------------------------------------------------
 def plot_scaling(budgets, e2e_stats, onprem_stats, output: Path) -> None:
-    fig, (ax_total, ax_hot) = plt.subplots(1, 2, figsize=(14, 6))
+    """Single panel: average (total system) throughput vs vCPU budget,
+    two dots per budget (Service vs On-prem), no connecting lines."""
+    fig, ax = plt.subplots(figsize=(9, 6))
 
     styles = [
         ("Service (E2E)", e2e_stats, "#1f77b4", "o"),
         ("On-prem",       onprem_stats, "#d62728", "s"),
     ]
 
-    for ax, key, title, ylabel in [
-        (ax_total, "total_rate", "Total System Throughput",      "Throughput (completions/s)"),
-        (ax_hot,   "hot_rate",   "Hot-Domain Throughput\n(avg during its 20 s / 60 % window)", "Hot-domain throughput (completions/s)"),
-    ]:
-        for label, stats, color, marker in styles:
-            ys = [s[key] for s in stats]
-            ax.plot(budgets, ys, label=label, color=color, marker=marker,
-                    linewidth=2.0, markersize=7)
-            for x, y in zip(budgets, ys):
-                ax.annotate(f"{y:.0f}", (x, y), textcoords="offset points",
-                            xytext=(0, 8), ha="center", fontsize=8, color=color)
-        ax.set_xlabel("Total vCPU budget", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.set_title(title, fontsize=12, fontweight="bold")
-        ax.set_xticks(budgets)
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim(bottom=0)
-        ax.legend(loc="upper left", fontsize=10)
+    for label, stats, color, marker in styles:
+        ys = [s["total_rate"] for s in stats]
+        # Dots only — scatter, no line joining the points.
+        ax.scatter(budgets, ys, label=label, color=color, marker=marker,
+                   s=90, zorder=3)
+        for x, y in zip(budgets, ys):
+            ax.annotate(f"{y:.0f}", (x, y), textcoords="offset points",
+                        xytext=(0, 9), ha="center", fontsize=9, color=color)
 
-    fig.suptitle("Service vs On-Prem Throughput Scaling — same budget, same verifier cores",
+    ax.set_xlabel("Total vCPU budget", fontsize=11)
+    ax.set_ylabel("Average throughput (completed verifications/s)", fontsize=11)
+    ax.set_title("Service vs On-Prem Average Throughput\n— same budget, same verifier cores",
                  fontsize=13, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    ax.set_xticks(budgets)
+    # Pad the x-range so the 10 and 60 dots aren't glued to the frame edge.
+    span = max(budgets) - min(budgets)
+    pad = span * 0.08 if span else 1
+    ax.set_xlim(min(budgets) - pad, max(budgets) + pad)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(bottom=0)
+    ax.legend(loc="upper left", fontsize=10)
+
+    fig.tight_layout()
     fig.savefig(output, dpi=150, bbox_inches="tight")
     print(f"Saved {output}")
 

@@ -367,11 +367,9 @@ python visualize_throughput_scaling.py `
   --output throughput_scaling_graph.png
 ```
 
-Two panels, two lines each (Service vs On-prem):
-- **Total system throughput vs budget** — both should grow with vCPU; the gap is the pooling dividend.
-- **Hot-domain throughput vs budget** — the starkest contrast: during its 60 % window a service-side domain can draw on the whole pool, an on-prem domain only on its 1/3/6/9 local verifiers.
+A single graph: **average (total system) throughput vs vCPU budget**. At each budget (10/20/40/60) there are two dots — Service (blue circle) and On-prem (red square), no connecting lines — so the head-to-head gap is readable per round. Throughput = all completed verifications across the 5 domains ÷ the run duration. Both systems grow with vCPU; the gap between the paired dots is the pooling dividend.
 
-The script also prints a summary table with service/on-prem ratios per round — those ratios are the quotable scalability numbers.
+The script also prints a summary table that additionally reports each round's **hot-domain** throughput and the service/on-prem ratios (total and hot) — those ratios are the quotable scalability numbers, even though only total throughput is plotted.
 
 ---
 
