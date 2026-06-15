@@ -470,6 +470,9 @@ The token pipeline is the bottleneck, not the verifiers. Run `docker stats` on t
 **A validator pins only during one phase of the shifting-focus run.**
 Each domain takes its turn as the hot domain (60 % of traffic), so a `VALIDATOR_CPUS` that's fine under uniform load can saturate during that domain's 20 s window. Raise `VALIDATOR_CPUS` for that round (it's applied to all five, since the hot role rotates).
 
+**proof-queue Redis pinned at its cap while snark/token Redis are idle (~7 %).**
+proof-queue absorbs every status-poll read (k6 polls each job many times), plus job metadata, the selector's brpop/counters, and validator write-backs — so it carries far more load than the other two brokers. It has its own knob, `PROOF_CPUS` (separate from `REDIS_CPUS`, which only sizes snark/token-queue). Redis is single-threaded, so give proof-queue up to a full core; bumping it past 1.0 won't help. If it pins, raise `PROOF_CPUS` and pull the budget from snark/token Redis or the idle validators.
+
 **`docker stack deploy` warns about undefined variables / selector starts with snark-count=45 in round 1.**
 The env file wasn't sourced into the deploying shell. Run `set -a; source e2e-throughput-round<R>.env; set +a` and redeploy. (Defaults in the compose file are round-4 values.)
 

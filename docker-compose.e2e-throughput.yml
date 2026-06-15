@@ -29,6 +29,9 @@ services:
   # ------------------------------------------
   # Shared Redis brokers (3 — no stark-queue in this track)
   # ------------------------------------------
+  # proof-queue carries the heaviest Redis load: every status poll from k6 is a
+  # read here, plus job metadata + the selector's brpop/counters + validator
+  # write-backs. It gets its own (larger) cap; snark/token queues stay small.
   proof-queue:
     image: redis:latest
     ports:
@@ -40,7 +43,7 @@ services:
           - node.role == manager
       resources:
         limits:
-          cpus: '${REDIS_CPUS:-0.3}'
+          cpus: '${PROOF_CPUS:-1.0}'
     networks:
       - zk-net
 
