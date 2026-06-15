@@ -110,6 +110,19 @@ export APP2_IP=<app2-private-ip>
 export APP3_IP=<app3-private-ip>
 export APP4_IP=<app4-private-ip>
 
+# Persist them to a file so EVERY later round (and any fresh SSH shell) can
+# re-source the same values. A missing export here is the #1 cause of
+# "submits accepted but 0% completed": docker stack deploy silently substitutes
+# 127.0.0.1 for any unset APP*_IP, so the token-issuer POSTs every JWT to itself
+# and no validator ever writes status=completed.
+cat > ~/app_ips.env <<EOF
+export APP0_IP=$APP0_IP
+export APP1_IP=$APP1_IP
+export APP2_IP=$APP2_IP
+export APP3_IP=$APP3_IP
+export APP4_IP=$APP4_IP
+EOF
+
 cd ~/zk-authaas
 set -a; source e2e-throughput-round1.env; set +a
 docker stack deploy -c docker-compose.e2e-throughput.yml zk
@@ -133,6 +146,12 @@ docker service ls
 TASK=$(docker service ps zk_verifier-selector --filter "desired-state=running" -q)
 docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK | xargs docker logs 2>&1 | head -3
 # Startup line must show snark-count=5
+
+# token-issuer must have the REAL app IPs, NOT 127.0.0.1 (reads a local
+# container's args — never hangs, unlike `docker service logs`):
+docker inspect $(docker ps -qf name=zk_token-issuer | head -1) --format '{{json .Args}}'
+# the --app-urls value must list your 5 private IPs; if it shows 127.0.0.1 the
+# APP*_IP exports were missing at deploy time — fix and redeploy.
 ```
 
 Apply the round's CPU cap to the 5 app validators (they run outside the Swarm stack, so the limit is applied directly to the running container — `VALIDATOR_CPUS` is in the same env file):
@@ -167,10 +186,24 @@ Work on the k6 EC2 inside `tmux`, with `ulimit -n 65536` set in that shell.
 ### A3a — Reconfigure to round R (skip for round 1 — already deployed)
 
 ```bash
-# On Manager (APP0_IP..APP4_IP must still be exported in this shell):
+# On Manager. ALWAYS re-source the app IPs first — a fresh SSH shell has lost
+# the exports, and deploying without them silently wires the token-issuer to
+# 127.0.0.1 (→ submits accepted but 0% completed).
+source ~/app_ips.env
 cd ~/zk-authaas
-set -a; source e2e-throughput-round<R>.env; set +a
-docker stack deploy -c docker-compose.e2e-throughput.yml zk
+
+# Guard: refuse to deploy unless all 5 app IPs are real (non-empty, non-loopback).
+# Safe to paste interactively — it never exits your shell, it just skips the deploy.
+BAD=""
+for V in APP0_IP APP1_IP APP2_IP APP3_IP APP4_IP; do
+  case "${!V}" in ""|127.*|localhost) BAD="$BAD $V";; esac
+done
+if [ -n "$BAD" ]; then
+  echo "[ABORT] App IPs unset/loopback:$BAD — fix ~/app_ips.env, do NOT deploy."
+else
+  set -a; source e2e-throughput-round<R>.env; set +a
+  docker stack deploy -c docker-compose.e2e-throughput.yml zk
+fi
 
 # Clear state from the previous round:
 docker exec $(docker ps -qf name=zk_proof-queue) redis-cli FLUSHALL
@@ -183,6 +216,8 @@ docker service ls
 # Verify the CURRENT selector container logs snark-count=<round's count>
 TASK=$(docker service ps zk_verifier-selector --filter "desired-state=running" -q)
 docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK | xargs docker logs 2>&1 | head -3
+# Verify token-issuer got the REAL app IPs (NOT 127.0.0.1):
+docker inspect $(docker ps -qf name=zk_token-issuer | head -1) --format '{{json .Args}}'
 ```
 
 ```powershell
@@ -200,6 +235,11 @@ foreach ($APP in @("<app0-pub>","<app1-pub>","<app2-pub>","<app3-pub>","<app4-pu
 ```
 
 ### A3b — VU sweep → record KNEE_VU_R
+
+> ✅ **Before sweeping, run the Step 9 single-job sanity check** (one valid proof
+> per domain → all `completed`). It takes seconds and catches a broken pipeline
+> — e.g. token-issuer on 127.0.0.1, a down validator, or a verifier/selector
+> count mismatch — *before* you waste a full sweep getting 0% completion.
 
 ```bash
 # On k6 EC2 (inside tmux)
@@ -417,6 +457,14 @@ Overhead bottleneck — see the capacity check in A3b. `docker stats` on the man
 
 **`docker stack deploy` warns about undefined variables / selector starts with snark-count=45 in round 1.**
 The env file wasn't sourced into the deploying shell. Run `set -a; source e2e-throughput-round<R>.env; set +a` and redeploy. (Defaults in the compose file are round-4 values.)
+
+**Submits accepted (HTTP 200) but 0% of jobs reach `completed`.**
+The token-issuer is POSTing JWTs to `127.0.0.1` instead of your app validators, so no validator ever writes `status=completed`. Cause: `APP*_IP` were not set in the shell at `docker stack deploy` time, and the compose file silently falls back to `127.0.0.1`. Confirm with:
+```bash
+docker inspect $(docker ps -qf name=zk_token-issuer | head -1) --format '{{json .Args}}'
+# look at the value after --app-urls
+```
+Fix: `source ~/app_ips.env` (created in Step A2), then redeploy with the round env file and FLUSHALL the queues. The Step A3a guard prevents this when you re-source `~/app_ips.env` first; the Step A3b single-job sanity check catches it before a full sweep.
 
 **Selector dispatch rate caps around the same value across rounds 3 and 4.**
 The selector is single-threaded; Track 1 demonstrated ~1800 jobs/s through the same v2 selector, well above round 4's ~1035/s — but if you see the dispatch-rate log plateau while `proof_queue` grows, raise `SELECTOR_CPUS` (it's the one component that doesn't scale by adding replicas).
