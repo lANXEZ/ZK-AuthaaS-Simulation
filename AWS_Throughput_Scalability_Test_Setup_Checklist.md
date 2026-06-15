@@ -187,10 +187,15 @@ docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' $TASK | xargs 
 
 ```powershell
 # From your laptop (PowerShell): re-apply validator caps with the round's
-# VALIDATOR_CPUS (0.4 / 0.32 / 0.84 / 0.94 for rounds 1/2/3/4):
+# VALIDATOR_CPUS. Set the value ONCE on the first line — do not leave a
+# <placeholder> inside the ssh command (bash would read <NAME> as a file
+# redirection and fail with "No such file or directory").
+$VALIDATOR_CPUS = "0.32"   # round value: 0.4 / 0.32 / 0.84 / 0.94 for R1/R2/R3/R4
 foreach ($APP in @("<app0-pub>","<app1-pub>","<app2-pub>","<app3-pub>","<app4-pub>")) {
+  # Double-quoted so $VALIDATOR_CPUS expands locally; `$(...) is escaped so the
+  # container-id lookup runs on the EC2's bash, not in PowerShell.
   ssh -i zk-authaas-ec2-key.pem "ubuntu@$APP" `
-    'docker update --cpus=<VALIDATOR_CPUS> $(docker ps -qf name=token-validator)'
+    "docker update --cpus=$VALIDATOR_CPUS `$(docker ps -qf name=token-validator)"
 }
 ```
 
@@ -217,7 +222,26 @@ Suggested `<ROUND_VU_LIST>` per round (bracket the expected knee):
 | 3 | `50,100,200,300,400,600,900` |
 | 4 | `50,100,200,400,600,800,1200,1800` |
 
-Copy back and plot if you want the knee graph (`python visualize_sweep.py --input sweep_e2e_thr_r<R>.csv --output sweep_e2e_thr_r<R>_graph.png`), or read the knee straight off the CSV.
+Then copy the sweep CSV back to your laptop and render the knee graph. The
+sweep ran on the **k6 EC2**, so `scp` from there (use its **public** IP):
+
+```powershell
+# From your laptop (PowerShell). Set the round you just swept.
+$R = 2                          # 1 / 2 / 3 / 4
+$K6_PUB = "<k6-public-ip>"      # k6 EC2 public IPv4
+cd "C:\Work\VSCodeRepo\ZK-AuthaaS-Simulation"
+
+# Pull the sweep CSV down …
+scp -i "zk-authaas-ec2-key.pem" "ubuntu@${K6_PUB}:~/sweep_e2e_thr_r${R}.csv" .
+
+# … and plot the throughput-vs-VUs knee curve (saves a PNG next to the CSV).
+python visualize_sweep.py --input "sweep_e2e_thr_r${R}.csv" --output "sweep_e2e_thr_r${R}_graph.png"
+```
+
+Open `sweep_e2e_thr_r<R>_graph.png` and read the **knee** — the VU level where
+the throughput curve stops climbing and flattens. That VU is `KNEE_VU_R`. (You
+can also eyeball the knee straight from the CSV's throughput column if you'd
+rather skip the graph.)
 
 📝 **Record `KNEE_VU_R`** in this table as you go — Part B consumes it:
 
