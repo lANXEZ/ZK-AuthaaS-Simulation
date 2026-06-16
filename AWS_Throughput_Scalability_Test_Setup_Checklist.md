@@ -435,10 +435,10 @@ python visualize_throughput_scaling.py `
   --budgets 10,20,40,60 `
   --e2e    test_results_e2e_thr_r1.csv,test_results_e2e_thr_r2.csv,test_results_e2e_thr_r3.csv,test_results_e2e_thr_r4.csv `
   --onprem test_results_onprem_thr_r1.csv,test_results_onprem_thr_r2.csv,test_results_onprem_thr_r3.csv,test_results_onprem_thr_r4.csv `
-  --output throughput_scaling_graph.png
+  --output throughput_scalability_graph.png
 ```
 
-A single graph: **average (total system) throughput vs vCPU budget**. At each budget (10/20/40/60) there are two dots — Service (blue circle) and On-prem (red square), no connecting lines — so the head-to-head gap is readable per round. Throughput = all completed verifications across the 5 domains ÷ the run duration. Both systems grow with vCPU; the gap between the paired dots is the pooling dividend.
+A single graph: **average (total system) throughput vs vCPU budget**. At each budget (10/20/40/60) there are two markers — Service (blue circle) and On-prem (red square) — joined by a line per system so both the scaling trend and the head-to-head gap are readable. Throughput = all completed verifications across the 5 domains ÷ the run duration. Both systems grow with vCPU; the gap between the two lines is the pooling dividend.
 
 The script also prints a summary table that additionally reports each round's **hot-domain** throughput and the service/on-prem ratios (total and hot) — those ratios are the quotable scalability numbers, even though only total throughput is plotted.
 

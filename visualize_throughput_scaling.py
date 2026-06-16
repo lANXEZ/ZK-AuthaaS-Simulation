@@ -6,10 +6,10 @@ Takes the 4 E2E (service) CSVs and the 4 on-prem CSVs — one per vCPU
 budget round — and plots a single graph:
 
   Average (total system) throughput vs total vCPU budget. At each budget
-  (10/20/40/60) there are two dots — Service (E2E, blue circle) and
-  On-prem (red square) — so the head-to-head gap is readable per round.
-  Throughput = all completed verifications across the 5 domains divided
-  by the run duration. Dots only, no connecting lines.
+  (10/20/40/60) there are two markers — Service (E2E, blue circle) and
+  On-prem (red square) — joined by a line per system so the scaling trend
+  and the head-to-head gap are both readable. Throughput = all completed
+  verifications across the 5 domains divided by the run duration.
 
 The printed summary table additionally reports each round's HOT-DOMAIN
 throughput (the avg completions/s a domain sustains during its own 20 s
@@ -103,7 +103,8 @@ def analyze_csv(path: Path) -> dict:
 # --------------------------------------------------------------------------
 def plot_scaling(budgets, e2e_stats, onprem_stats, output: Path) -> None:
     """Single panel: average (total system) throughput vs vCPU budget,
-    two dots per budget (Service vs On-prem), no connecting lines."""
+    one marker per budget per system, joined by a line to show the scaling
+    trend (Service vs On-prem)."""
     fig, ax = plt.subplots(figsize=(9, 6))
 
     styles = [
@@ -113,16 +114,16 @@ def plot_scaling(budgets, e2e_stats, onprem_stats, output: Path) -> None:
 
     for label, stats, color, marker in styles:
         ys = [s["total_rate"] for s in stats]
-        # Dots only — scatter, no line joining the points.
-        ax.scatter(budgets, ys, label=label, color=color, marker=marker,
-                   s=90, zorder=3)
+        # Markers joined by a line so the scaling trend is visible.
+        ax.plot(budgets, ys, label=label, color=color, marker=marker,
+                linestyle="-", linewidth=2.0, markersize=9, zorder=3)
         for x, y in zip(budgets, ys):
             ax.annotate(f"{y:.0f}", (x, y), textcoords="offset points",
                         xytext=(0, 9), ha="center", fontsize=9, color=color)
 
     ax.set_xlabel("Total vCPU budget", fontsize=11)
     ax.set_ylabel("Average throughput (completed verifications/s)", fontsize=11)
-    ax.set_title("Service vs On-Prem Average Throughput\n— same budget, same verifier cores",
+    ax.set_title("Throughput Scalability: Service vs On-Prem\n— same budget, same verifier cores",
                  fontsize=13, fontweight="bold")
     ax.set_xticks(budgets)
     # Pad the x-range so the 10 and 60 dots aren't glued to the frame edge.
@@ -149,7 +150,7 @@ def main() -> None:
                     help="Comma-separated E2E CSVs, in the same order as --budgets")
     ap.add_argument("--onprem", required=True,
                     help="Comma-separated on-prem CSVs, in the same order as --budgets")
-    ap.add_argument("--output", default="throughput_scaling_graph.png", help="Output PNG path")
+    ap.add_argument("--output", default="throughput_scalability_graph.png", help="Output PNG path")
     args = ap.parse_args()
 
     budgets = [float(b) for b in args.budgets.split(",")]
