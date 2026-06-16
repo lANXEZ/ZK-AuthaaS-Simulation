@@ -28,11 +28,21 @@ services:
   proof-queue:
     image: redis:latest
     cpus: ${REDIS_CPUS:-0.25}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
     networks: [onprem-net]
 
   snark-queue:
     image: redis:latest
     cpus: ${REDIS_CPUS:-0.25}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
     networks: [onprem-net]
 
   # ------------------------------------------
@@ -44,7 +54,10 @@ services:
       dockerfile: Dockerfile.requesthandler
     image: zk-authaas/request-handler:latest
     cpus: ${HANDLER_CPUS:-1.8}
-    depends_on: [proof-queue]
+    depends_on:
+      proof-queue:
+        condition: service_healthy
+    restart: on-failure
     environment:
       - PYTHONUNBUFFERED=1
     command:
@@ -69,7 +82,12 @@ services:
       dockerfile: Dockerfile.selector
     image: zk-authaas/verifier-selector:latest
     cpus: ${SELECTOR_CPUS:-0.7}
-    depends_on: [proof-queue, snark-queue]
+    depends_on:
+      proof-queue:
+        condition: service_healthy
+      snark-queue:
+        condition: service_healthy
+    restart: on-failure
     environment:
       - PYTHONUNBUFFERED=1
     command:
@@ -112,7 +130,12 @@ services:
       dockerfile: Dockerfile.snark
     image: zk-authaas/snark-verifier:latest
     cpus: 1.0
-    depends_on: [snark-queue, proof-queue]
+    depends_on:
+      snark-queue:
+        condition: service_healthy
+      proof-queue:
+        condition: service_healthy
+    restart: on-failure
     environment:
       - TASK_SLOT=1
     command:
